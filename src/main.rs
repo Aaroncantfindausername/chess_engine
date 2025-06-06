@@ -1,3 +1,4 @@
+use chess_board::Square;
 fn main() {
-    println!("hello");
+    let pawn = Square::Pawn;
 }
