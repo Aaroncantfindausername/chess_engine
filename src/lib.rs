@@ -6,9 +6,4 @@ mod gui;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_test() {
-        //let pawn = chess_board::Square::Pawn;
-    }
 }

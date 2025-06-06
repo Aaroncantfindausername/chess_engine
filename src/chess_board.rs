@@ -62,17 +62,42 @@ impl Board {
         };
         // Place black backrank
         for (column, &piece) in backrank.iter().enumerate() {
-            place(0, column, piece, Black)
+            place(0, column, piece, White)
         }
         // Place white backrank
         for (column, &piece) in backrank.iter().enumerate() {
-            place(7, column, piece, White)
+            place(7, column, piece, Black)
         }
         // Place pawns
         for column in 0..8 {
-            place(1, column, Pawn, Black);
-            place(6, column, Pawn, White);
+            place(1, column, Pawn, White);
+            place(6, column, Pawn, Black);
         }
         Board(board)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_standard_board() {
+        let board = Board::create_standard();
+        assert!(matches!(
+            board[0].0,
+            Some(Piece {
+                kind: PieceKind::Rook,
+                colour: Colour::White
+            })
+        ));
+        assert!(matches!(
+            board[63].0,
+            Some(Piece {
+                kind: PieceKind::Rook,
+                colour: Colour::Black
+            })
+        ));
+        assert!(board[4].0.unwrap().kind == PieceKind::King);
     }
 }
