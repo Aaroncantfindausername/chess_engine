@@ -58,16 +58,33 @@ enum MoveError {
     PieceNotExists,
 }
 
-impl Index<u8> for Board {
+impl Index<BoardPos> for Board {
     type Output = Square;
-    fn index(&self, index: u8) -> &Self::Output {
-        &self.0[index as usize]
+    fn index(&self, index: BoardPos) -> &Self::Output {
+        &self.0[index.0 as usize]
     }
 }
-impl IndexMut<u8> for Board {
-    fn index_mut(&mut self, index: u8) -> &mut Self::Output {
-        &mut self.0[index as usize]
+impl IndexMut<BoardPos> for Board {
+    fn index_mut(&mut self, index: BoardPos) -> &mut Self::Output {
+        &mut self.0[index.0 as usize]
     }
+}
+
+impl BoardPos {
+    pub const A1: BoardPos = BoardPos(1);
+    pub const H1: BoardPos = BoardPos(7);
+    pub const E1: BoardPos = BoardPos(4);
+    pub const F1: BoardPos = BoardPos(5);
+    pub const G1: BoardPos = BoardPos(6);
+    pub const C1: BoardPos = BoardPos(2);
+    pub const D1: BoardPos = BoardPos(3);
+    pub const A8: BoardPos = BoardPos(1 + 56);
+    pub const H8: BoardPos = BoardPos(7 + 56);
+    pub const E8: BoardPos = BoardPos(4 + 56);
+    pub const F8: BoardPos = BoardPos(5 + 56);
+    pub const G8: BoardPos = BoardPos(6 + 56);
+    pub const C8: BoardPos = BoardPos(2 + 56);
+    pub const D8: BoardPos = BoardPos(3 + 56);
 }
 
 impl Board {
@@ -99,8 +116,8 @@ impl Board {
     }
 
     pub fn make_legal_move(mut self, mv: LegalMove) -> Self {
-        let from = mv.0.from.0;
-        let to = mv.0.to.0;
+        let from = mv.0.from;
+        let to = mv.0.to;
         if let Square(Some(piece)) = self[from] {
             use Colour::*;
             use PieceKind::*;
@@ -110,15 +127,15 @@ impl Board {
                     colour: White,
                 } => {
                     // Check for short castle white
-                    if to == 6 && from == 4 {
+                    if to == BoardPos::G1 && from == BoardPos::E1 {
                         // Move rook
-                        self.0[5] = sq!(Rook, White);
-                        self.0[7] = sq!();
-                    } else if to == 2 && from == 4 {
+                        self[BoardPos::F1] = sq!(Rook, White);
+                        self[BoardPos::H1] = sq!();
+                    } else if to.0 == 2 && from.0 == 4 {
                         // long castle white
                         // Move rook
-                        self.0[3] = sq!(Rook, White);
-                        self.0[0] = sq!();
+                        self[BoardPos::D1] = sq!(Rook, White);
+                        self[BoardPos::A1] = sq!();
                     }
                 }
                 Piece {
@@ -126,28 +143,34 @@ impl Board {
                     colour: Black,
                 } => {
                     // Check for short castle black
-                    if to == 6 + 56 && from == 60 {
+                    if to == BoardPos::G8 && from == BoardPos::E8 {
                         // Move rook
-                        self.0[5 + 56] = sq!(Rook, Black);
-                        self.0[7 + 56] = sq!();
-                    } else if to == 58 && from == 60 {
+                        self[BoardPos::F8] = sq!(Rook, Black);
+                        self[BoardPos::H8] = sq!();
+                    } else if to == BoardPos::C8 && from == BoardPos::E8 {
                         // long castle black
                         // Move rook
-                        self.0[3 + 56] = sq!(Rook, Black);
-                        self.0[56] = sq!();
+                        self[BoardPos::D8] = sq!(Rook, Black);
+                        self[BoardPos::A8] = sq!();
                     }
                 }
                 Piece { kind: Pawn, colour } => {
-                    let from_file = from % 8;
-                    let to_file = to % 8;
+                    let from_file = from.0 % 8;
+                    let to_file = to.0 % 8;
                     // En passant: diagonal move but target square is empty
                     if (to_file != from_file) && self[to].0.is_none() {
                         let captured_pawn_pos = match colour {
-                            Black => to - 8,
-                            White => to + 8,
+                            Black => to.0 - 8,
+                            White => to.0 + 8,
                         };
-                        self[captured_pawn_pos] = sq!();
+                        self[BoardPos(captured_pawn_pos)] = sq!();
                     } else if (to_file, colour) == (7, White) || (to_file, colour) == (0, Black) {
+                        let kind =
+                            mv.0.promotion_type
+                                .expect("No promotion_type given for move");
+                        self[to] = Square(Some(Piece { kind, colour }));
+                        self[from] = sq!();
+                        return self;
                     }
                 }
                 _ => {}
@@ -167,22 +190,22 @@ mod tests {
     fn test_standard_board() {
         let board = Board::create_standard();
         assert!(matches!(
-            board[0].0,
+            board[BoardPos(0)].0,
             Some(Piece {
                 kind: PieceKind::Rook,
                 colour: Colour::White
             })
         ));
         assert!(matches!(
-            board[63].0,
+            board[BoardPos(63)].0,
             Some(Piece {
                 kind: PieceKind::Rook,
                 colour: Colour::Black
             })
         ));
-        assert!(board[4].0.unwrap().kind == PieceKind::King);
+        assert!(board[BoardPos(4)].0.unwrap().kind == PieceKind::King);
         assert!(matches!(
-            board[1].0,
+            board[BoardPos(1)].0,
             Some(Piece {
                 kind: PieceKind::Knight,
                 colour: Colour::White,
