@@ -1,9 +1,3 @@
-mod chess_board;
-mod engine;
-mod gui;
-
-//use chess_board::{Board, Square};
-#[cfg(test)]
-mod tests {
-    use super::*;
-}
+pub mod chess_board;
+pub mod engine;
+pub mod gui;
