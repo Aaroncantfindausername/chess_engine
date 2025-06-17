@@ -1,5 +1,7 @@
 use std::ops::{Index, IndexMut};
 
+use bevy::ecs::resource::Resource;
+
 macro_rules! sq {
     ($kind:ident, $colour:ident) => {
         Square(Some(Piece {
@@ -29,7 +31,7 @@ enum Colour {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Piece {
+pub struct Piece {
     kind: PieceKind,
     colour: Colour,
 }
@@ -38,9 +40,9 @@ struct Piece {
 pub struct Square(Option<Piece>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BoardPos(u8);
+pub struct BoardPos(pub u8);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Resource)]
 pub struct Board([Square; 64]);
 
 #[derive(Debug, Clone, Copy)]
@@ -56,6 +58,15 @@ pub struct LegalMove(pub Move);
 enum MoveError {
     OutOfBound,
     PieceNotExists,
+}
+
+impl Square {
+    pub fn get_piece(self) -> Option<Piece> {
+        if let Square(Some(piece)) = self {
+            return Some(piece);
+        }
+        None
+    }
 }
 
 impl Index<BoardPos> for Board {
