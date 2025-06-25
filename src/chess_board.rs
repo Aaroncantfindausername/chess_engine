@@ -1,6 +1,9 @@
-use std::ops::{Index, IndexMut};
+use std::{
+    fmt::Display,
+    ops::{Index, IndexMut},
+};
 
-use bevy::ecs::resource::Resource;
+use bevy::ecs::{component::Component, resource::Resource};
 
 macro_rules! sq {
     ($kind:ident, $colour:ident) => {
@@ -14,8 +17,8 @@ macro_rules! sq {
     };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PieceKind {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Component)]
+pub enum PieceKind {
     King,
     Rook,
     Pawn,
@@ -25,15 +28,15 @@ enum PieceKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Colour {
+pub enum Colour {
     Black,
     White,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Piece {
-    kind: PieceKind,
-    colour: Colour,
+    pub kind: PieceKind,
+    pub colour: Colour,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +69,24 @@ impl Square {
             return Some(piece);
         }
         None
+    }
+}
+
+impl Display for Piece {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let piece = match self.kind {
+            PieceKind::King => "king",
+            PieceKind::Rook => "rook",
+            PieceKind::Pawn => "pawn",
+            PieceKind::Queen => "queen",
+            PieceKind::Bishop => "bishop",
+            PieceKind::Knight => "knight",
+        };
+        let colour = match self.colour {
+            Colour::Black => "_black",
+            Colour::White => "_white",
+        };
+        write!(f, "{piece}{colour}")
     }
 }
 
@@ -123,6 +144,7 @@ impl Board {
             place(1, column, Pawn, White);
             place(6, column, Pawn, Black);
         }
+        println!("{:?}", board[63]);
         Board(board)
     }
 
