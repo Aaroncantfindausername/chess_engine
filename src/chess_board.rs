@@ -1,6 +1,7 @@
 use std::{
     fmt::Display,
-    ops::{Index, IndexMut},
+    ops::{Deref, Index, IndexMut},
+    u8,
 };
 
 use bevy::ecs::{component::Component, resource::Resource};
@@ -17,7 +18,7 @@ macro_rules! sq {
     };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Component)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PieceKind {
     King,
     Rook,
@@ -27,25 +28,61 @@ pub enum PieceKind {
     Knight,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Colour {
     Black,
     White,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Piece {
-    pub kind: PieceKind,
-    pub colour: Colour,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Resource, Hash)]
+pub struct ToMove(Colour);
+impl Deref for ToMove {
+    type Target = Colour;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl ToMove {
+    pub fn new(colour: Colour) -> Self {
+        ToMove(colour)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Component, Hash)]
+pub struct Piece {
+    kind: PieceKind,
+    colour: Colour,
+}
+
+impl Piece {
+    pub fn get_kind(&self) -> PieceKind {
+        self.kind
+    }
+    pub fn get_colour(&self) -> Colour {
+        self.colour
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Square(Option<Piece>);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BoardPos(pub u8);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Component)]
+pub struct BoardPos(u8);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Resource)]
+impl BoardPos {
+    pub fn new(pos: u8) -> Self {
+        BoardPos(pos)
+    }
+}
+
+impl From<BoardPos> for usize {
+    fn from(value: BoardPos) -> Self {
+        value.0 as usize
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Resource)]
 pub struct Board([Square; 64]);
 
 #[derive(Debug, Clone, Copy)]
@@ -69,6 +106,18 @@ impl Square {
             return Some(piece);
         }
         None
+    }
+}
+
+impl Default for ToMove {
+    fn default() -> Self {
+        ToMove(Colour::White)
+    }
+}
+
+impl Default for Board {
+    fn default() -> Self {
+        Board::create_standard()
     }
 }
 

@@ -1,9 +1,10 @@
-use bevy::prelude::*;
+use bevy::{input_focus::InputFocus, prelude::*};
 use chess_engine::gui::*;
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
         .add_plugins(gui_plugin)
+        .init_resource::<InputFocus>()
         .run();
 }
