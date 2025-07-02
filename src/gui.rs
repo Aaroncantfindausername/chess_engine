@@ -38,7 +38,6 @@ pub fn gui_plugin(app: &mut App) {
         .init_resource::<WorldCursorCoords>()
         .init_resource::<DragPiece>()
         .init_resource::<BoardSqPos>()
-        .init_resource::<ToMove>()
         .add_systems(Startup, (setup_camera, setup_board))
         .add_systems(
             Update,
@@ -148,7 +147,6 @@ pub fn setup_camera(mut commands: Commands) {
 
 pub fn square_press_system(
     mut is_drag: ResMut<DragPiece>,
-    turn: Res<ToMove>,
     piece_query: Query<(&BoardPos, &Piece), With<Piece>>,
     board_sq_pos: Res<BoardSqPos>,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -156,14 +154,16 @@ pub fn square_press_system(
     board: Res<Board>,
 ) {
     let mut target_idx: Option<BoardPos> = None;
+    let turn = board.get_turn();
     if buttons.just_pressed(MouseButton::Left) {
         if let Some(idx) = cords_to_index(cursor_cords.get()) {
             if board[idx]
                 .get_piece()
-                .is_some_and(|piece| piece.get_colour() == **turn)
+                .is_some_and(|piece| piece.get_colour() == *turn)
             {
                 // Pressed piece
                 eprintln!("Pressed on movable piece with index: {idx:?}");
+                // Display legal moves
                 target_idx = Some(idx);
             }
         }
@@ -202,13 +202,13 @@ fn cords_to_index(pos: Vec3) -> Option<BoardPos> {
 
 pub fn square_drag_system(
     mut is_drag: ResMut<DragPiece>,
-    mut turn: ResMut<ToMove>,
     mut board: ResMut<Board>,
     board_sq_pos: Res<BoardSqPos>,
     buttons: Res<ButtonInput<MouseButton>>,
     cursor_cords: Res<WorldCursorCoords>,
     mut piece_query: Query<(&mut BoardPos, &mut Transform), With<BoardPos>>,
 ) {
+    let turn = board.get_turn();
     let mut released = false;
     if let Some(pos) = is_drag.get() {
         if buttons.just_released(MouseButton::Left) {
@@ -221,24 +221,17 @@ pub fn square_drag_system(
             if *idx == pos {
                 if released {
                     eprintln!("Released and Snapping to grid");
+                    // todo board should make the move, and make sure move is legal
                     let target_index = cords_to_index(transform.translation);
                     let vec;
                     if let Some(pos) = target_index {
                         vec = board_sq_pos[pos];
                         *idx = pos;
-                        match **turn {
-                            Colour::Black => *turn = ToMove::new(Colour::White),
-                            Colour::White => *turn = ToMove::new(Colour::Black),
-                        }
                     } else {
                         vec = board_sq_pos[*idx]
                     }
                     *transform = transform.with_translation(vec);
                 } else {
-                    eprintln!(
-                        "square_drag_system - unreleased and dragging, cursor coords: {:?}, current coords: {:?}",
-                        cursor_cords.deref().get(), transform.translation
-                    );
                     *transform = transform
                         .deref()
                         .with_translation(cursor_cords.deref().get().with_z(1.0));

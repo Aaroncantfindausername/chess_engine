@@ -34,7 +34,7 @@ pub enum Colour {
     White,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Resource, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ToMove(Colour);
 impl Deref for ToMove {
     type Target = Colour;
@@ -74,6 +74,70 @@ impl BoardPos {
     pub fn new(pos: u8) -> Self {
         BoardPos(pos)
     }
+
+    pub fn get_row(&self) -> u8 {
+        self.0 / 8
+    }
+
+    pub fn get_column(&self) -> u8 {
+        self.0 % 8
+    }
+
+    pub fn try_increment_row(&self) -> Option<u8> {
+        let incr_row = (self.0 / 8) + 1;
+        if incr_row < 8 {
+            Some(incr_row)
+        } else {
+            None
+        }
+    }
+
+    pub fn try_decrement_row(&self) -> Option<u8> {
+        let decr_row = (self.0 / 8) - 1;
+        if decr_row >= 0 {
+            Some(decr_row)
+        } else {
+            None
+        }
+    }
+
+    pub fn try_increment_column(&self) -> Option<u8> {
+        let incr_column = (self.0 % 8) + 1;
+        if incr_column < 8 {
+            Some(incr_column)
+        } else {
+            None
+        }
+    }
+
+    pub fn try_decrement_column(&self) -> Option<u8> {
+        let decr_column = (self.0 % 8) - 1;
+        if decr_column >= 0 {
+            Some(decr_column)
+        } else {
+            None
+        }
+    }
+
+    pub fn try_move_diagonally_north_east(&self) -> Option<u8> {
+        let new_idx = BoardPos::try_increment_row(&BoardPos(self.try_increment_column()?));
+        new_idx
+    }
+
+    pub fn try_move_diagonally_north_west(&self) -> Option<u8> {
+        let new_idx = BoardPos::try_increment_row(&BoardPos(self.try_decrement_column()?));
+        new_idx
+    }
+
+    pub fn try_move_diagonally_south_east(&self) -> Option<u8> {
+        let new_idx = BoardPos::try_decrement_row(&BoardPos(self.try_increment_column()?));
+        new_idx
+    }
+
+    pub fn try_move_diagonally_south_west(&self) -> Option<u8> {
+        let new_idx = BoardPos::try_decrement_row(&BoardPos(self.try_decrement_column()?));
+        new_idx
+    }
 }
 
 impl From<BoardPos> for usize {
@@ -83,17 +147,51 @@ impl From<BoardPos> for usize {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Resource)]
-pub struct Board([Square; 64]);
+pub struct Board {
+    squares: [Square; 64],
+    turn: ToMove,
+    in_check: bool,
+    castle_rights: CastleRights,
+}
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CastleRights {
+    black: bool,
+    white: bool,
+}
+
+impl CastleRights {
+    pub fn get(&self, colour: Colour) -> bool {
+        match colour {
+            Colour::Black => self.black,
+            Colour::White => self.white,
+        }
+    }
+
+    pub fn set(&mut self, colour: Colour, val: bool) {
+        match colour {
+            Colour::Black => self.black = val,
+            Colour::White => self.white = val,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Move {
     from: BoardPos,
     to: BoardPos,
     promotion_type: Option<PieceKind>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct LegalMove(pub Move);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LegalMove(Move);
+
+impl Deref for LegalMove {
+    type Target = Move;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 enum MoveError {
     OutOfBound,
@@ -142,12 +240,12 @@ impl Display for Piece {
 impl Index<BoardPos> for Board {
     type Output = Square;
     fn index(&self, index: BoardPos) -> &Self::Output {
-        &self.0[index.0 as usize]
+        &self.squares[index.0 as usize]
     }
 }
 impl IndexMut<BoardPos> for Board {
     fn index_mut(&mut self, index: BoardPos) -> &mut Self::Output {
-        &mut self.0[index.0 as usize]
+        &mut self.squares[index.0 as usize]
     }
 }
 
@@ -169,6 +267,14 @@ impl BoardPos {
 }
 
 impl Board {
+    pub fn get_turn(&self) -> ToMove {
+        self.turn
+    }
+
+    pub fn in_check(&self) -> bool {
+        self.in_check
+    }
+
     pub fn create_standard() -> Self {
         use Colour::*;
         use PieceKind::*;
@@ -194,7 +300,15 @@ impl Board {
             place(6, column, Pawn, Black);
         }
         println!("{:?}", board[63]);
-        Board(board)
+        Board {
+            squares: board,
+            turn: ToMove::new(Colour::White),
+            in_check: false,
+            castle_rights: CastleRights {
+                black: true,
+                white: true,
+            },
+        }
     }
 
     pub fn make_legal_move(mut self, mv: LegalMove) -> Self {
@@ -261,6 +375,81 @@ impl Board {
             self[from] = sq!();
         }
         self
+    }
+
+    pub fn movable_squares(&self, idx: BoardPos) -> Vec<BoardPos> {
+        // Closure to continue searching and addind movable squares in a direction according to
+        // a function
+        let search_movable_squares =
+            |shift: fn(&BoardPos) -> Option<u8>, vec: &mut Vec<BoardPos>| {
+                while let Some(possible_index) = shift(&idx) {
+                    let possible_board_pos = BoardPos::new(possible_index);
+                    if let Square(Some(piece)) = self[possible_board_pos] {
+                        // If moving into squares with ally pieces, stop searching
+                        if piece.get_colour() == *self.turn {
+                            break;
+                        } else {
+                            // If moving into square with enemy piece, add that postition then
+                            // stop searching
+                            vec.push(possible_board_pos);
+                            break;
+                        }
+                    }
+                    vec.push(possible_board_pos);
+                }
+            };
+
+        let mut vec: Vec<BoardPos> = Vec::new();
+        eprintln!("vec has lenth: {:?}", vec.len());
+        let piece_kind = self[idx]
+            .get_piece()
+            .expect("Cannot call board::movable_squares on an empty square")
+            .get_kind();
+        if !self.in_check {
+            match piece_kind {
+                PieceKind::Rook => {
+                    for shift in [
+                        BoardPos::try_increment_row,
+                        BoardPos::try_increment_column,
+                        BoardPos::try_decrement_row,
+                        BoardPos::try_decrement_column,
+                    ] {
+                        search_movable_squares(shift, &mut vec);
+                    }
+                }
+                PieceKind::Bishop => {
+                    for shift in [
+                        BoardPos::try_move_diagonally_north_east,
+                        BoardPos::try_move_diagonally_north_west,
+                        BoardPos::try_move_diagonally_south_east,
+                        BoardPos::try_move_diagonally_south_west,
+                    ] {
+                        search_movable_squares(shift, &mut vec);
+                    }
+                }
+                PieceKind::Queen => {
+                    for shift in [
+                        BoardPos::try_move_diagonally_north_east,
+                        BoardPos::try_move_diagonally_north_west,
+                        BoardPos::try_move_diagonally_south_east,
+                        BoardPos::try_move_diagonally_south_west,
+                        BoardPos::try_increment_row,
+                        BoardPos::try_increment_column,
+                        BoardPos::try_decrement_row,
+                        BoardPos::try_decrement_column,
+                    ] {
+                        search_movable_squares(shift, &mut vec);
+                    }
+                }
+            }
+        } else {
+            todo!("moves while in check");
+        }
+        vec
+    }
+
+    pub fn legal_moves(&self, idx: BoardPos) -> Vec<LegalMove> {
+        Vec::new()
     }
 }
 
