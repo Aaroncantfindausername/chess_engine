@@ -35,6 +35,14 @@ pub enum Colour {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BoardDirection {
+    Vertical,
+    Horizontal,
+    DiagonalNE,
+    DiagonalNW,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ToMove(Colour);
 impl Deref for ToMove {
     type Target = Colour;
@@ -83,60 +91,56 @@ impl BoardPos {
         self.0 % 8
     }
 
-    pub fn try_increment_row(&self) -> Option<u8> {
-        let incr_row = (self.0 / 8) + 1;
-        if incr_row < 8 {
-            Some(incr_row)
+    pub fn try_move_up(&self) -> Option<BoardPos> {
+        if self.get_row() < 7 {
+            Some(BoardPos::new(self.0 + 8))
         } else {
             None
         }
     }
 
-    pub fn try_decrement_row(&self) -> Option<u8> {
-        let decr_row = (self.0 / 8) - 1;
-        if decr_row >= 0 {
-            Some(decr_row)
+    pub fn try_move_down(&self) -> Option<BoardPos> {
+        if self.get_row() > 0 {
+            Some(BoardPos::new(self.0 - 8))
         } else {
             None
         }
     }
 
-    pub fn try_increment_column(&self) -> Option<u8> {
-        let incr_column = (self.0 % 8) + 1;
-        if incr_column < 8 {
-            Some(incr_column)
+    pub fn try_move_left(&self) -> Option<BoardPos> {
+        if self.get_column() > 0 {
+            Some(BoardPos::new(self.0 - 1))
         } else {
             None
         }
     }
 
-    pub fn try_decrement_column(&self) -> Option<u8> {
-        let decr_column = (self.0 % 8) - 1;
-        if decr_column >= 0 {
-            Some(decr_column)
+    pub fn try_move_right(&self) -> Option<BoardPos> {
+        if self.get_column() < 7 {
+            Some(BoardPos::new(self.0 + 1))
         } else {
             None
         }
     }
 
-    pub fn try_move_diagonally_north_east(&self) -> Option<u8> {
-        let new_idx = BoardPos::try_increment_row(&BoardPos(self.try_increment_column()?));
-        new_idx
+    pub fn chain_try_moves(
+        moves: Vec<impl Fn(&BoardPos) -> Option<BoardPos>>,
+    ) -> impl Fn(&BoardPos) -> Option<BoardPos> {
+        move |idx: &BoardPos| moves.iter().try_fold(*idx, |acc, elem| elem(&acc))
     }
 
-    pub fn try_move_diagonally_north_west(&self) -> Option<u8> {
-        let new_idx = BoardPos::try_increment_row(&BoardPos(self.try_decrement_column()?));
-        new_idx
+    pub fn try_move_diag_north_east(&self) -> Option<BoardPos> {
+        BoardPos::chain_try_moves(vec![BoardPos::try_move_up, BoardPos::try_move_right])(self)
     }
 
-    pub fn try_move_diagonally_south_east(&self) -> Option<u8> {
-        let new_idx = BoardPos::try_decrement_row(&BoardPos(self.try_increment_column()?));
-        new_idx
+    pub fn try_move_diag_north_west(&self) -> Option<BoardPos> {
+        BoardPos::chain_try_moves(vec![BoardPos::try_move_up, BoardPos::try_move_left])(self)
     }
-
-    pub fn try_move_diagonally_south_west(&self) -> Option<u8> {
-        let new_idx = BoardPos::try_decrement_row(&BoardPos(self.try_decrement_column()?));
-        new_idx
+    pub fn try_move_diag_south_east(&self) -> Option<BoardPos> {
+        BoardPos::chain_try_moves(vec![BoardPos::try_move_down, BoardPos::try_move_right])(self)
+    }
+    pub fn try_move_diag_south_west(&self) -> Option<BoardPos> {
+        BoardPos::chain_try_moves(vec![BoardPos::try_move_down, BoardPos::try_move_left])(self)
     }
 }
 
@@ -149,9 +153,10 @@ impl From<BoardPos> for usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Resource)]
 pub struct Board {
     squares: [Square; 64],
-    turn: ToMove,
+    pub turn: ToMove,
     in_check: bool,
     castle_rights: CastleRights,
+    last_move: Option<LegalMove>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -250,14 +255,16 @@ impl IndexMut<BoardPos> for Board {
 }
 
 impl BoardPos {
-    pub const A1: BoardPos = BoardPos(1);
+    pub const A1: BoardPos = BoardPos(0);
+    pub const B1: BoardPos = BoardPos(1);
     pub const H1: BoardPos = BoardPos(7);
     pub const E1: BoardPos = BoardPos(4);
     pub const F1: BoardPos = BoardPos(5);
     pub const G1: BoardPos = BoardPos(6);
     pub const C1: BoardPos = BoardPos(2);
     pub const D1: BoardPos = BoardPos(3);
-    pub const A8: BoardPos = BoardPos(1 + 56);
+    pub const A8: BoardPos = BoardPos(56);
+    pub const B8: BoardPos = BoardPos(1 + 56);
     pub const H8: BoardPos = BoardPos(7 + 56);
     pub const E8: BoardPos = BoardPos(4 + 56);
     pub const F8: BoardPos = BoardPos(5 + 56);
@@ -273,6 +280,10 @@ impl Board {
 
     pub fn in_check(&self) -> bool {
         self.in_check
+    }
+
+    pub fn has_castle_rights(&self) -> bool {
+        self.castle_rights.get(self.turn.0)
     }
 
     pub fn create_standard() -> Self {
@@ -308,6 +319,7 @@ impl Board {
                 black: true,
                 white: true,
             },
+            last_move: None,
         }
     }
 
@@ -377,13 +389,24 @@ impl Board {
         self
     }
 
-    pub fn movable_squares(&self, idx: BoardPos) -> Vec<BoardPos> {
-        // Closure to continue searching and addind movable squares in a direction according to
-        // a function
+    fn pseudolegal_movable_squares(&self, idx: BoardPos) -> Vec<BoardPos> {
         let search_movable_squares =
-            |shift: fn(&BoardPos) -> Option<u8>, vec: &mut Vec<BoardPos>| {
-                while let Some(possible_index) = shift(&idx) {
-                    let possible_board_pos = BoardPos::new(possible_index);
+            |shift: &dyn Fn(&BoardPos) -> Option<BoardPos>, vec: &mut Vec<BoardPos>| {
+                if let Some(possible_board_pos) = shift(&idx) {
+                    if let Some(Piece { kind, colour }) = self[possible_board_pos].get_piece() {
+                        if colour != *self.get_turn() {
+                            vec.push(possible_board_pos);
+                        }
+                    } else {
+                        vec.push(possible_board_pos);
+                    }
+                }
+            };
+        // Closure to continue searching and adding movable squares in a direction according to
+        // a function
+        let repeated_search_movable_squares =
+            |shift: &dyn Fn(&BoardPos) -> Option<BoardPos>, vec: &mut Vec<BoardPos>| {
+                while let Some(possible_board_pos) = shift(&idx) {
                     if let Square(Some(piece)) = self[possible_board_pos] {
                         // If moving into squares with ally pieces, stop searching
                         if piece.get_colour() == *self.turn {
@@ -398,58 +421,249 @@ impl Board {
                     vec.push(possible_board_pos);
                 }
             };
-
         let mut vec: Vec<BoardPos> = Vec::new();
-        eprintln!("vec has lenth: {:?}", vec.len());
+        eprintln!("vec has length (should be 0): {:?}", vec.len());
         let piece_kind = self[idx]
             .get_piece()
             .expect("Cannot call board::movable_squares on an empty square")
             .get_kind();
-        if !self.in_check {
-            match piece_kind {
-                PieceKind::Rook => {
-                    for shift in [
-                        BoardPos::try_increment_row,
-                        BoardPos::try_increment_column,
-                        BoardPos::try_decrement_row,
-                        BoardPos::try_decrement_column,
-                    ] {
-                        search_movable_squares(shift, &mut vec);
-                    }
+
+        match piece_kind {
+            PieceKind::Rook => {
+                for shift in [
+                    BoardPos::try_move_up,
+                    BoardPos::try_move_right,
+                    BoardPos::try_move_down,
+                    BoardPos::try_move_left,
+                ] {
+                    repeated_search_movable_squares(&shift, &mut vec);
                 }
-                PieceKind::Bishop => {
-                    for shift in [
-                        BoardPos::try_move_diagonally_north_east,
-                        BoardPos::try_move_diagonally_north_west,
-                        BoardPos::try_move_diagonally_south_east,
-                        BoardPos::try_move_diagonally_south_west,
-                    ] {
-                        search_movable_squares(shift, &mut vec);
-                    }
+            }
+            PieceKind::Bishop => {
+                for shift in [
+                    BoardPos::try_move_diag_north_east,
+                    BoardPos::try_move_diag_north_west,
+                    BoardPos::try_move_diag_south_east,
+                    BoardPos::try_move_diag_south_west,
+                ] {
+                    repeated_search_movable_squares(&shift, &mut vec);
                 }
-                PieceKind::Queen => {
-                    for shift in [
-                        BoardPos::try_move_diagonally_north_east,
-                        BoardPos::try_move_diagonally_north_west,
-                        BoardPos::try_move_diagonally_south_east,
-                        BoardPos::try_move_diagonally_south_west,
-                        BoardPos::try_increment_row,
-                        BoardPos::try_increment_column,
-                        BoardPos::try_decrement_row,
-                        BoardPos::try_decrement_column,
-                    ] {
-                        search_movable_squares(shift, &mut vec);
+            }
+            PieceKind::Queen => {
+                for shift in [
+                    BoardPos::try_move_up,
+                    BoardPos::try_move_right,
+                    BoardPos::try_move_down,
+                    BoardPos::try_move_left,
+                    BoardPos::try_move_diag_north_east,
+                    BoardPos::try_move_diag_north_west,
+                    BoardPos::try_move_diag_south_east,
+                    BoardPos::try_move_diag_south_west,
+                ] {
+                    repeated_search_movable_squares(&shift, &mut vec);
+                }
+            }
+            PieceKind::King => {
+                // Check movements
+                for shift in [
+                    BoardPos::try_move_diag_north_east,
+                    BoardPos::try_move_diag_north_west,
+                    BoardPos::try_move_diag_south_east,
+                    BoardPos::try_move_diag_south_west,
+                    BoardPos::try_move_up,
+                    BoardPos::try_move_right,
+                    BoardPos::try_move_down,
+                    BoardPos::try_move_left,
+                ] {
+                    search_movable_squares(&shift, &mut vec)
+                }
+                // Check if can castle, and if so add the positions
+                if self.has_castle_rights() {
+                    let mut can_long_castle = true;
+                    for idx in [BoardPos::B1, BoardPos::C1, BoardPos::D1] {
+                        if self[idx].get_piece().is_some() {
+                            can_long_castle = false;
+                        }
+                    }
+                    if can_long_castle {
+                        vec.push(BoardPos::C1);
+                    }
+                    let mut can_short_castle = true;
+                    for idx in [BoardPos::F1, BoardPos::G1] {
+                        if self[idx].get_piece().is_some() {
+                            can_short_castle = false;
+                        }
+                    }
+                    if can_short_castle {
+                        vec.push(BoardPos::G1);
                     }
                 }
             }
-        } else {
-            todo!("moves while in check");
+            PieceKind::Knight => {
+                for shift in [
+                    BoardPos::chain_try_moves(vec![
+                        BoardPos::try_move_diag_south_west,
+                        BoardPos::try_move_down,
+                    ]),
+                    BoardPos::chain_try_moves(vec![
+                        BoardPos::try_move_diag_south_west,
+                        BoardPos::try_move_left,
+                    ]),
+                    BoardPos::chain_try_moves(vec![
+                        BoardPos::try_move_diag_south_east,
+                        BoardPos::try_move_down,
+                    ]),
+                    BoardPos::chain_try_moves(vec![
+                        BoardPos::try_move_diag_south_east,
+                        BoardPos::try_move_right,
+                    ]),
+                    BoardPos::chain_try_moves(vec![
+                        BoardPos::try_move_diag_north_east,
+                        BoardPos::try_move_up,
+                    ]),
+                    BoardPos::chain_try_moves(vec![
+                        BoardPos::try_move_diag_north_east,
+                        BoardPos::try_move_right,
+                    ]),
+                    BoardPos::chain_try_moves(vec![
+                        BoardPos::try_move_diag_north_west,
+                        BoardPos::try_move_up,
+                    ]),
+                    BoardPos::chain_try_moves(vec![
+                        BoardPos::try_move_diag_north_west,
+                        BoardPos::try_move_left,
+                    ]),
+                ] {
+                    search_movable_squares(&shift, &mut vec);
+                }
+            }
+            PieceKind::Pawn => {
+                for shift in [
+                    BoardPos::try_move_up,
+                    BoardPos::try_move_diag_north_east,
+                    BoardPos::try_move_diag_north_west,
+                ] {
+                    search_movable_squares(&shift, &mut vec);
+                }
+            }
         }
         vec
     }
 
-    pub fn legal_moves(&self, idx: BoardPos) -> Vec<LegalMove> {
-        Vec::new()
+    pub fn legal_movable_squares(&self, idx: BoardPos) -> Vec<BoardPos> {
+        if self.in_check {
+            // Find attacking moves
+            Vec::new()
+        } else {
+            self.pseudolegal_movable_squares(idx)
+        }
+    }
+
+    fn is_move_out_of_check(&self, mv: Move) -> bool {
+        if self.in_check {
+            let last_mv = self
+                .last_move
+                .expect("Shouldn't call is_move_out_of_check when last move doesn't exist")
+                .0;
+        } else {
+            panic!("calling is_move_out_of_check when not in check");
+        }
+        false
+    }
+
+    fn is_piece_absolute_pinned(&self, idx: BoardPos, direction: BoardDirection) -> bool {
+        let move_fn = match direction {
+            BoardDirection::Vertical => BoardPos::try_move_up,
+            BoardDirection::Horizontal => BoardPos::try_move_right,
+            BoardDirection::DiagonalNE => BoardPos::try_move_diag_north_east,
+            BoardDirection::DiagonalNW => BoardPos::try_move_diag_north_west,
+        };
+
+        let opposite_move_fn = match direction {
+            BoardDirection::Vertical => BoardPos::try_move_down,
+            BoardDirection::Horizontal => BoardPos::try_move_left,
+            BoardDirection::DiagonalNE => BoardPos::try_move_diag_south_west,
+            BoardDirection::DiagonalNW => BoardPos::try_move_diag_south_east,
+        };
+        let piece = self[idx]
+            .get_piece()
+            .expect("Expected piece found empty square");
+        eprintln!("pin fn received piece: {piece:?}");
+        let mut king_open_ray_piece: bool = false;
+        let mut opponent_open_ray_piece: bool = false;
+        let mut search_idx: BoardPos = idx;
+        while let Some(new_idx) = move_fn(&search_idx) {
+            eprintln!("searched square: {:?}", self[new_idx]);
+            match self[new_idx] {
+                Square(Some(Piece { kind, colour }))
+                    if colour == piece.colour && kind != PieceKind::King =>
+                {
+                    eprintln!("returning false because found {colour:?} {kind:?}");
+                    return false;
+                }
+                Square(Some(Piece { kind, colour }))
+                    if colour == piece.colour && kind == PieceKind::King =>
+                {
+                    king_open_ray_piece = true;
+                    break;
+                }
+                Square(Some(Piece { kind, colour })) if colour != piece.colour => {
+                    if ((direction == BoardDirection::Horizontal
+                        || direction == BoardDirection::Vertical)
+                        && (kind == PieceKind::Rook || kind == PieceKind::Queen))
+                        || ((direction == BoardDirection::DiagonalNE
+                            || direction == BoardDirection::DiagonalNW)
+                            && (kind == PieceKind::Bishop || kind == PieceKind::Queen))
+                    {
+                        opponent_open_ray_piece = true;
+                        break;
+                    } else {
+                        eprintln!("returning false because found {colour:?} {kind:?}");
+                        return false;
+                    }
+                }
+                _ => {}
+            };
+            search_idx = new_idx;
+        }
+        //eprintln!("finished forward search");
+        search_idx = idx;
+        while let Some(new_idx) = opposite_move_fn(&search_idx) {
+            eprintln!("searched square: {:?}", self[new_idx]);
+            match self[new_idx] {
+                Square(Some(Piece { kind, colour }))
+                    if colour == piece.colour && kind != PieceKind::King =>
+                {
+                    //eprintln!("returning false because found {colour:?} {kind:?}");
+                    return false;
+                }
+                Square(Some(Piece { kind, colour }))
+                    if colour == piece.colour && kind == PieceKind::King =>
+                {
+                    king_open_ray_piece = true;
+                    break;
+                }
+                Square(Some(Piece { kind, colour })) if colour != piece.colour => {
+                    if ((direction == BoardDirection::Horizontal
+                        || direction == BoardDirection::Vertical)
+                        && (kind == PieceKind::Rook || kind == PieceKind::Queen))
+                        || ((direction == BoardDirection::DiagonalNE
+                            || direction == BoardDirection::DiagonalNW)
+                            && (kind == PieceKind::Bishop || kind == PieceKind::Queen))
+                    {
+                        opponent_open_ray_piece = true;
+                        break;
+                    } else {
+                        //eprintln!("returning false because found {colour:?} {kind:?}");
+                        return false;
+                    }
+                }
+                _ => {}
+            };
+            search_idx = new_idx;
+        }
+        //eprintln!("pin fn opponent_open_ray_piece: {opponent_open_ray_piece:?}, king_open_ray_piece: {king_open_ray_piece:?}");
+        opponent_open_ray_piece && king_open_ray_piece
     }
 }
 
@@ -482,5 +696,37 @@ mod tests {
                 colour: Colour::White,
             }),
         ));
+    }
+
+    #[test]
+    fn test_chain_moves() {
+        let pos = BoardPos::new(11);
+        let x =
+            BoardPos::chain_try_moves(vec![BoardPos::try_move_up, BoardPos::try_move_right])(&pos);
+        assert_eq!(x, Some(BoardPos::new(20)));
+    }
+
+    #[test]
+    fn test_possible_moves_pawn() {
+        let board = Board::create_standard();
+        let moves = board.pseudolegal_movable_squares(BoardPos::new(8));
+        assert_eq!(moves, vec![BoardPos(16), BoardPos(17)]);
+    }
+
+    #[test]
+    fn test_possible_moves_king() {
+        let board = Board::create_standard();
+        let moves = board.pseudolegal_movable_squares(BoardPos::new(4));
+        assert_eq!(moves, Vec::new());
+    }
+
+    #[test]
+    fn test_absolute_pin() {
+        let mut board = Board::create_standard();
+        board.squares[52] = Square(Some(Piece {
+            kind: PieceKind::Rook,
+            colour: Colour::Black,
+        }));
+        assert!(board.is_piece_absolute_pinned(BoardPos::new(12), BoardDirection::Vertical));
     }
 }
