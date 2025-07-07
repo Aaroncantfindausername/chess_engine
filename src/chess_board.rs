@@ -42,6 +42,28 @@ enum BoardDirection {
     DiagonalNW,
 }
 
+impl BoardDirection {
+    fn get_move_functions(
+        &self,
+    ) -> (
+        fn(&BoardPos) -> Option<BoardPos>,
+        fn(&BoardPos) -> Option<BoardPos>,
+    ) {
+        match *self {
+            Self::Vertical => (BoardPos::try_move_up, BoardPos::try_move_down),
+            Self::Horizontal => (BoardPos::try_move_right, BoardPos::try_move_left),
+            Self::DiagonalNE => (
+                BoardPos::try_move_diag_north_east,
+                BoardPos::try_move_diag_south_west,
+            ),
+            Self::DiagonalNW => (
+                BoardPos::try_move_diag_north_west,
+                BoardPos::try_move_diag_south_east,
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ToMove(Colour);
 impl Deref for ToMove {
@@ -560,6 +582,7 @@ impl Board {
     }
 
     fn is_move_out_of_check(&self, mv: Move) -> bool {
+        // TODO
         if self.in_check {
             let last_mv = self
                 .last_move
@@ -572,98 +595,56 @@ impl Board {
     }
 
     fn is_piece_absolute_pinned(&self, idx: BoardPos, direction: BoardDirection) -> bool {
-        let move_fn = match direction {
-            BoardDirection::Vertical => BoardPos::try_move_up,
-            BoardDirection::Horizontal => BoardPos::try_move_right,
-            BoardDirection::DiagonalNE => BoardPos::try_move_diag_north_east,
-            BoardDirection::DiagonalNW => BoardPos::try_move_diag_north_west,
-        };
-
-        let opposite_move_fn = match direction {
-            BoardDirection::Vertical => BoardPos::try_move_down,
-            BoardDirection::Horizontal => BoardPos::try_move_left,
-            BoardDirection::DiagonalNE => BoardPos::try_move_diag_south_west,
-            BoardDirection::DiagonalNW => BoardPos::try_move_diag_south_east,
-        };
         let piece = self[idx]
             .get_piece()
             .expect("Expected piece found empty square");
         eprintln!("pin fn received piece: {piece:?}");
-        let mut king_open_ray_piece: bool = false;
-        let mut opponent_open_ray_piece: bool = false;
-        let mut search_idx: BoardPos = idx;
-        while let Some(new_idx) = move_fn(&search_idx) {
-            eprintln!("searched square: {:?}", self[new_idx]);
-            match self[new_idx] {
-                Square(Some(Piece { kind, colour }))
-                    if colour == piece.colour && kind != PieceKind::King =>
-                {
-                    eprintln!("returning false because found {colour:?} {kind:?}");
-                    return false;
-                }
-                Square(Some(Piece { kind, colour }))
-                    if colour == piece.colour && kind == PieceKind::King =>
-                {
-                    king_open_ray_piece = true;
-                    break;
-                }
-                Square(Some(Piece { kind, colour })) if colour != piece.colour => {
-                    if ((direction == BoardDirection::Horizontal
-                        || direction == BoardDirection::Vertical)
-                        && (kind == PieceKind::Rook || kind == PieceKind::Queen))
-                        || ((direction == BoardDirection::DiagonalNE
-                            || direction == BoardDirection::DiagonalNW)
-                            && (kind == PieceKind::Bishop || kind == PieceKind::Queen))
-                    {
-                        opponent_open_ray_piece = true;
-                        break;
-                    } else {
-                        eprintln!("returning false because found {colour:?} {kind:?}");
-                        return false;
+        fn scan_ray(
+            board: &Board,
+            start: BoardPos,
+            next_fn: impl Fn(&BoardPos) -> Option<BoardPos>,
+            our_colour: Colour,
+            expected_threats: &[PieceKind],
+        ) -> Option<&'static str> {
+            let mut pos = start;
+            while let Some(new_idx) = next_fn(&pos) {
+                //eprintln!("searched square: {:?}", self[new_idx]);
+                match board[new_idx] {
+                    Square(Some(Piece { kind, colour })) if colour == our_colour => {
+                        if kind == PieceKind::King {
+                            return Some("king");
+                        } else {
+                            return None;
+                        }
                     }
-                }
-                _ => {}
-            };
-            search_idx = new_idx;
-        }
-        //eprintln!("finished forward search");
-        search_idx = idx;
-        while let Some(new_idx) = opposite_move_fn(&search_idx) {
-            eprintln!("searched square: {:?}", self[new_idx]);
-            match self[new_idx] {
-                Square(Some(Piece { kind, colour }))
-                    if colour == piece.colour && kind != PieceKind::King =>
-                {
-                    //eprintln!("returning false because found {colour:?} {kind:?}");
-                    return false;
-                }
-                Square(Some(Piece { kind, colour }))
-                    if colour == piece.colour && kind == PieceKind::King =>
-                {
-                    king_open_ray_piece = true;
-                    break;
-                }
-                Square(Some(Piece { kind, colour })) if colour != piece.colour => {
-                    if ((direction == BoardDirection::Horizontal
-                        || direction == BoardDirection::Vertical)
-                        && (kind == PieceKind::Rook || kind == PieceKind::Queen))
-                        || ((direction == BoardDirection::DiagonalNE
-                            || direction == BoardDirection::DiagonalNW)
-                            && (kind == PieceKind::Bishop || kind == PieceKind::Queen))
-                    {
-                        opponent_open_ray_piece = true;
-                        break;
-                    } else {
-                        //eprintln!("returning false because found {colour:?} {kind:?}");
-                        return false;
+                    Square(Some(Piece { kind, colour })) if colour != our_colour => {
+                        if expected_threats.contains(&kind) {
+                            return Some("threat");
+                        } else {
+                            return None;
+                        }
                     }
-                }
-                _ => {}
-            };
-            search_idx = new_idx;
+                    _ => {}
+                };
+                pos = new_idx;
+            }
+            None
         }
-        //eprintln!("pin fn opponent_open_ray_piece: {opponent_open_ray_piece:?}, king_open_ray_piece: {king_open_ray_piece:?}");
-        opponent_open_ray_piece && king_open_ray_piece
+        let expected_threats = match direction {
+            BoardDirection::Vertical | BoardDirection::Horizontal => {
+                &[PieceKind::Rook, PieceKind::Queen]
+            }
+            BoardDirection::DiagonalNE | BoardDirection::DiagonalNW => {
+                &[PieceKind::Bishop, PieceKind::Queen]
+            }
+        };
+        let (forward, backward) = direction.get_move_functions();
+        let forward_scan = scan_ray(self, idx, forward, piece.colour, expected_threats);
+        let backward_scan = scan_ray(self, idx, backward, piece.colour, expected_threats);
+        matches!(
+            (forward_scan, backward_scan),
+            (Some("king"), Some("threat")) | (Some("threat"), Some("king"))
+        )
     }
 }
 
