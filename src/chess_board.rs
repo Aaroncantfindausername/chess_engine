@@ -4,7 +4,10 @@ use std::{
     u8,
 };
 
-use bevy::ecs::{component::Component, resource::Resource};
+use bevy::{
+    ecs::{component::Component, resource::Resource},
+    state::state::last_transition,
+};
 
 macro_rules! sq {
     ($kind:ident, $colour:ident) => {
@@ -28,10 +31,124 @@ pub enum PieceKind {
     Knight,
 }
 
+impl PieceKind {
+    fn get_move_functions(&self) -> Vec<Box<dyn Fn(&BoardPos) -> Option<BoardPos>>> {
+        match *self {
+            Self::Knight => vec![
+                Box::new(BoardPos::chain_try_moves(vec![
+                    BoardPos::try_move_diag_south_west,
+                    BoardPos::try_move_down,
+                ])),
+                Box::new(BoardPos::chain_try_moves(vec![
+                    BoardPos::try_move_diag_south_west,
+                    BoardPos::try_move_left,
+                ])),
+                Box::new(BoardPos::chain_try_moves(vec![
+                    BoardPos::try_move_diag_south_east,
+                    BoardPos::try_move_down,
+                ])),
+                Box::new(BoardPos::chain_try_moves(vec![
+                    BoardPos::try_move_diag_south_east,
+                    BoardPos::try_move_right,
+                ])),
+                Box::new(BoardPos::chain_try_moves(vec![
+                    BoardPos::try_move_diag_north_east,
+                    BoardPos::try_move_up,
+                ])),
+                Box::new(BoardPos::chain_try_moves(vec![
+                    BoardPos::try_move_diag_north_east,
+                    BoardPos::try_move_right,
+                ])),
+                Box::new(BoardPos::chain_try_moves(vec![
+                    BoardPos::try_move_diag_north_west,
+                    BoardPos::try_move_up,
+                ])),
+                Box::new(BoardPos::chain_try_moves(vec![
+                    BoardPos::try_move_diag_north_west,
+                    BoardPos::try_move_left,
+                ])),
+            ],
+            Self::King => vec![
+                Box::new(BoardPos::try_move_up),
+                Box::new(BoardPos::try_move_down),
+                Box::new(BoardPos::try_move_left),
+                Box::new(BoardPos::try_move_right),
+                Box::new(BoardPos::try_move_diag_north_east),
+                Box::new(BoardPos::try_move_diag_south_east),
+                Box::new(BoardPos::try_move_diag_south_west),
+                Box::new(BoardPos::try_move_diag_north_west),
+            ],
+
+            Self::Rook => vec![
+                Box::new(BoardPos::try_move_up),
+                Box::new(BoardPos::try_move_down),
+                Box::new(BoardPos::try_move_left),
+                Box::new(BoardPos::try_move_right),
+            ],
+
+            Self::Queen => vec![
+                Box::new(BoardPos::try_move_up),
+                Box::new(BoardPos::try_move_down),
+                Box::new(BoardPos::try_move_left),
+                Box::new(BoardPos::try_move_right),
+                Box::new(BoardPos::try_move_diag_north_east),
+                Box::new(BoardPos::try_move_diag_south_east),
+                Box::new(BoardPos::try_move_diag_south_west),
+                Box::new(BoardPos::try_move_diag_north_west),
+            ],
+
+            Self::Bishop => vec![
+                Box::new(BoardPos::try_move_diag_north_east),
+                Box::new(BoardPos::try_move_diag_south_east),
+                Box::new(BoardPos::try_move_diag_south_west),
+                Box::new(BoardPos::try_move_diag_north_west),
+            ],
+            Self::Pawn => Vec::new(),
+        }
+    }
+
+    fn is_ray_piece(&self) -> bool {
+        match *self {
+            Self::King => false,
+            Self::Rook => true,
+            Self::Pawn => false,
+            Self::Knight => false,
+            Self::Queen => true,
+            Self::Bishop => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Colour {
     Black,
     White,
+}
+
+impl Colour {
+    const WHITE_EN_PASSANT_ROW: u8 = 4;
+    const BLACK_EN_PASSANT_ROW: u8 = 3;
+    const WHITE_PAWN_ROW: u8 = 1;
+    const BLACK_PAWN_ROW: u8 = 6;
+    pub fn other_colour(&self) -> Self {
+        match *self {
+            Colour::Black => Colour::White,
+            Colour::White => Colour::Black,
+        }
+    }
+    fn get_en_passant_row(&self) -> u8 {
+        match *self {
+            Colour::Black => Colour::BLACK_EN_PASSANT_ROW,
+            Colour::White => Colour::WHITE_EN_PASSANT_ROW,
+        }
+    }
+
+    fn get_starting_pawn_row(&self) -> u8 {
+        match *self {
+            Colour::Black => Colour::BLACK_PAWN_ROW,
+            Colour::White => Colour::WHITE_PAWN_ROW,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -105,12 +222,22 @@ impl BoardPos {
         BoardPos(pos)
     }
 
-    pub fn get_row(&self) -> u8 {
+    fn get_row(&self) -> u8 {
         self.0 / 8
     }
 
-    pub fn get_column(&self) -> u8 {
+    fn get_column(&self) -> u8 {
         self.0 % 8
+    }
+
+    fn is_in_same_column_or_row(&self, idx: BoardPos) -> bool {
+        self.get_row() == idx.get_row() || self.get_column() == idx.get_column()
+    }
+
+    fn is_in_same_diagonal(&self, idx: BoardPos) -> bool {
+        let row_diff = self.get_row().abs_diff(idx.get_row());
+        let column_diff = self.get_column().abs_diff(idx.get_column());
+        column_diff == row_diff
     }
 
     pub fn try_move_up(&self) -> Option<BoardPos> {
@@ -345,6 +472,56 @@ impl Board {
         }
     }
 
+    fn can_en_passant(&self, idx: BoardPos) -> bool {
+        let pawn = self[idx]
+            .get_piece()
+            .expect("should be checking en passant for non empty square");
+        if pawn.kind != PieceKind::Pawn || pawn.colour != self.turn.0 {
+            panic!("should be checking en passant for pawns on the side to move only");
+        }
+        if let Some(LegalMove(last_move)) = self.last_move {
+            if self[last_move.to]
+                != Square(Some(Piece {
+                    kind: PieceKind::Pawn,
+                    colour: pawn.colour.other_colour(),
+                }))
+            {
+                return false;
+            } else if idx.get_row() != pawn.colour.get_en_passant_row() {
+                return false;
+            } else if last_move.to.get_row() != pawn.colour.get_en_passant_row()
+                || last_move.from.get_row() != pawn.colour.get_starting_pawn_row()
+            {
+                return false;
+            } else if last_move.to.get_column() >= idx.get_column() {
+                if last_move.to.get_column() - idx.get_column() != 1 {
+                    return false;
+                } else if self[idx
+                    .try_move_diag_south_east()
+                    .expect("should be able to move diag south east")]
+                .0
+                .is_some()
+                {
+                    return false;
+                }
+            } else if last_move.to.get_column() < idx.get_column() {
+                if idx.get_column() - last_move.to.get_column() != 1 {
+                    return false;
+                } else if self[idx
+                    .try_move_diag_south_west()
+                    .expect("should be able to move diag south west")]
+                .0
+                .is_some()
+                {
+                    return false;
+                }
+            }
+        } else {
+            return false;
+        }
+        true
+    }
+
     pub fn make_legal_move(mut self, mv: LegalMove) -> Self {
         let from = mv.0.from;
         let to = mv.0.to;
@@ -444,60 +621,35 @@ impl Board {
                 }
             };
         let mut vec: Vec<BoardPos> = Vec::new();
-        eprintln!("vec has length (should be 0): {:?}", vec.len());
         let piece_kind = self[idx]
             .get_piece()
             .expect("Cannot call board::movable_squares on an empty square")
             .get_kind();
-
+        let piece_colour = self[idx]
+            .get_piece()
+            .expect("Cannot call board::movable_squares on an empty square")
+            .get_colour();
+        let move_fns = piece_kind.get_move_functions();
         match piece_kind {
             PieceKind::Rook => {
-                for shift in [
-                    BoardPos::try_move_up,
-                    BoardPos::try_move_right,
-                    BoardPos::try_move_down,
-                    BoardPos::try_move_left,
-                ] {
-                    repeated_search_movable_squares(&shift, &mut vec);
+                for shift in move_fns {
+                    repeated_search_movable_squares(shift.deref(), &mut vec);
                 }
             }
             PieceKind::Bishop => {
-                for shift in [
-                    BoardPos::try_move_diag_north_east,
-                    BoardPos::try_move_diag_north_west,
-                    BoardPos::try_move_diag_south_east,
-                    BoardPos::try_move_diag_south_west,
-                ] {
-                    repeated_search_movable_squares(&shift, &mut vec);
+                for shift in move_fns {
+                    repeated_search_movable_squares(shift.deref(), &mut vec);
                 }
             }
             PieceKind::Queen => {
-                for shift in [
-                    BoardPos::try_move_up,
-                    BoardPos::try_move_right,
-                    BoardPos::try_move_down,
-                    BoardPos::try_move_left,
-                    BoardPos::try_move_diag_north_east,
-                    BoardPos::try_move_diag_north_west,
-                    BoardPos::try_move_diag_south_east,
-                    BoardPos::try_move_diag_south_west,
-                ] {
-                    repeated_search_movable_squares(&shift, &mut vec);
+                for shift in move_fns {
+                    repeated_search_movable_squares(shift.deref(), &mut vec);
                 }
             }
             PieceKind::King => {
                 // Check movements
-                for shift in [
-                    BoardPos::try_move_diag_north_east,
-                    BoardPos::try_move_diag_north_west,
-                    BoardPos::try_move_diag_south_east,
-                    BoardPos::try_move_diag_south_west,
-                    BoardPos::try_move_up,
-                    BoardPos::try_move_right,
-                    BoardPos::try_move_down,
-                    BoardPos::try_move_left,
-                ] {
-                    search_movable_squares(&shift, &mut vec)
+                for shift in move_fns {
+                    search_movable_squares(shift.deref(), &mut vec)
                 }
                 // Check if can castle, and if so add the positions
                 if self.has_castle_rights() {
@@ -522,54 +674,171 @@ impl Board {
                 }
             }
             PieceKind::Knight => {
-                for shift in [
-                    BoardPos::chain_try_moves(vec![
-                        BoardPos::try_move_diag_south_west,
-                        BoardPos::try_move_down,
-                    ]),
-                    BoardPos::chain_try_moves(vec![
-                        BoardPos::try_move_diag_south_west,
-                        BoardPos::try_move_left,
-                    ]),
-                    BoardPos::chain_try_moves(vec![
-                        BoardPos::try_move_diag_south_east,
-                        BoardPos::try_move_down,
-                    ]),
-                    BoardPos::chain_try_moves(vec![
-                        BoardPos::try_move_diag_south_east,
-                        BoardPos::try_move_right,
-                    ]),
-                    BoardPos::chain_try_moves(vec![
-                        BoardPos::try_move_diag_north_east,
-                        BoardPos::try_move_up,
-                    ]),
-                    BoardPos::chain_try_moves(vec![
-                        BoardPos::try_move_diag_north_east,
-                        BoardPos::try_move_right,
-                    ]),
-                    BoardPos::chain_try_moves(vec![
-                        BoardPos::try_move_diag_north_west,
-                        BoardPos::try_move_up,
-                    ]),
-                    BoardPos::chain_try_moves(vec![
-                        BoardPos::try_move_diag_north_west,
-                        BoardPos::try_move_left,
-                    ]),
-                ] {
-                    search_movable_squares(&shift, &mut vec);
+                for shift in move_fns {
+                    search_movable_squares(shift.deref(), &mut vec);
                 }
             }
             PieceKind::Pawn => {
-                for shift in [
-                    BoardPos::try_move_up,
-                    BoardPos::try_move_diag_north_east,
-                    BoardPos::try_move_diag_north_west,
-                ] {
-                    search_movable_squares(&shift, &mut vec);
+                let pawn_search_movable_squares =
+                    |vertical_shift: &dyn Fn(&BoardPos) -> Option<BoardPos>,
+                     diag_shifts: &[&dyn Fn(&BoardPos) -> Option<BoardPos>; 2],
+                     vec: &mut Vec<BoardPos>| {
+                        if let Some(possible_board_pos) = vertical_shift(&idx) {
+                            if self[possible_board_pos].get_piece() == None {
+                                vec.push(possible_board_pos);
+                            }
+                        }
+                        for &shift in diag_shifts {
+                            if let Some(possible_board_pos) = shift(&idx) {
+                                if let Some(Piece { kind, colour }) =
+                                    self[possible_board_pos].get_piece()
+                                {
+                                    if colour != piece_colour {
+                                        vec.push(possible_board_pos);
+                                    }
+                                }
+                            }
+                        }
+                    };
+                //Check if starting row
+                if idx.get_row() == piece_colour.get_starting_pawn_row() {
+                    let vert_movement = match piece_colour {
+                        Colour::Black => BoardPos::try_move_down,
+                        Colour::White => BoardPos::try_move_up,
+                    };
+                    let one_forward_pos = vert_movement(&idx)
+                        .expect("should be able to move forwards as pawn from starting row");
+                    let two_forward_pos = vert_movement(&one_forward_pos).expect(
+                        "should be able to move forwards 2 spaces as pawn from starting row",
+                    );
+                    if self[two_forward_pos].0.is_none() && self[one_forward_pos].0.is_none() {
+                        // If starting row pawn and forwand 2 positions are empty, add move forward
+                        // 2 squares to possible moves positions
+                        vec.push(two_forward_pos);
+                    }
+                }
+                if self.can_en_passant(idx) {
+                    let last_move_column = self
+                        .last_move
+                        .expect("should have last move if can en passant")
+                        .to
+                        .get_column();
+                    if idx.get_column() > last_move_column {
+                        match piece_colour {
+                            Colour::Black => vec.push(
+                                idx.try_move_diag_south_east()
+                                    .expect("Should be valid since can en passant"),
+                            ),
+                            Colour::White => vec.push(
+                                idx.try_move_diag_north_east()
+                                    .expect("Should be valid since can en passant"),
+                            ),
+                        }
+                    } else {
+                        match piece_colour {
+                            Colour::Black => vec.push(
+                                idx.try_move_diag_south_west()
+                                    .expect("Should be valid since can en passant"),
+                            ),
+                            Colour::White => vec.push(
+                                idx.try_move_diag_north_west()
+                                    .expect("Should be valid since can en passant"),
+                            ),
+                        }
+                    }
                 }
             }
         }
         vec
+    }
+
+    fn attacking_squares(&self, idx: BoardPos) -> Vec<BoardPos> {
+        let piece_colour = self[idx]
+            .0
+            .expect("should be finding attacking squares for non-empty square")
+            .colour;
+        let other_colour = piece_colour.other_colour();
+        let mut attacking_positions: Vec<BoardPos> = Vec::new();
+        let directional_move_fns = PieceKind::Queen.get_move_functions();
+        let kinght_move_fns = PieceKind::Knight.get_move_functions();
+        for shift in directional_move_fns {
+            let mut search_depth: usize = 0;
+            let mut try_pos = idx;
+            while let Some(possible_board_pos) = shift(&try_pos) {
+                search_depth += 1;
+                if let Square(Some(searched_piece)) = self[possible_board_pos] {
+                    // If moving into squares with ally pieces, stop searching
+                    if searched_piece.get_colour() == piece_colour {
+                        break;
+                    } else {
+                        // If find square with enemy piece, add that postition if the piece can
+                        // attack the piece then
+                        // stop searching in that direction
+                        match searched_piece.kind {
+                            PieceKind::Rook => {
+                                if idx.is_in_same_column_or_row(possible_board_pos) {
+                                    attacking_positions.push(possible_board_pos);
+                                }
+                            }
+                            PieceKind::Bishop => {
+                                if idx.is_in_same_diagonal(possible_board_pos) {
+                                    attacking_positions.push(possible_board_pos);
+                                }
+                            }
+                            PieceKind::Queen => {
+                                if idx.is_in_same_column_or_row(possible_board_pos)
+                                    || idx.is_in_same_diagonal(possible_board_pos)
+                                {
+                                    attacking_positions.push(possible_board_pos);
+                                }
+                            }
+                            PieceKind::King => {
+                                if (idx.is_in_same_column_or_row(possible_board_pos)
+                                    || idx.is_in_same_diagonal(possible_board_pos))
+                                    && search_depth == 1
+                                {
+                                    attacking_positions.push(possible_board_pos);
+                                }
+                            }
+                            PieceKind::Pawn => {
+                                if search_depth == 1 && idx.is_in_same_diagonal(possible_board_pos)
+                                {
+                                    match other_colour {
+                                        Colour::Black => {
+                                            if idx.get_row() < possible_board_pos.get_row() {
+                                                attacking_positions.push(possible_board_pos);
+                                            }
+                                        }
+                                        Colour::White => {
+                                            if idx.get_row() > possible_board_pos.get_row() {
+                                                attacking_positions.push(possible_board_pos);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        break;
+                    }
+                }
+                try_pos = possible_board_pos;
+            }
+        }
+        // now check knight attackable squares
+        for shift in kinght_move_fns {
+            if let Some(possible_board_pos) = shift(&idx) {
+                if let Square(Some(searched_piece)) = self[possible_board_pos] {
+                    // If moving into squares with ally pieces, stop searching
+                    if searched_piece.get_colour() != piece_colour
+                        && searched_piece.kind == PieceKind::Knight
+                    {
+                        attacking_positions.push(possible_board_pos);
+                    }
+                }
+            }
+        }
+        attacking_positions
     }
 
     pub fn legal_movable_squares(&self, idx: BoardPos) -> Vec<BoardPos> {
@@ -579,19 +848,6 @@ impl Board {
         } else {
             self.pseudolegal_movable_squares(idx)
         }
-    }
-
-    fn is_move_out_of_check(&self, mv: Move) -> bool {
-        // TODO
-        if self.in_check {
-            let last_mv = self
-                .last_move
-                .expect("Shouldn't call is_move_out_of_check when last move doesn't exist")
-                .0;
-        } else {
-            panic!("calling is_move_out_of_check when not in check");
-        }
-        false
     }
 
     fn is_piece_absolute_pinned(&self, idx: BoardPos, direction: BoardDirection) -> bool {
