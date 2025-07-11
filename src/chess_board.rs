@@ -1,6 +1,7 @@
 use std::{
     fmt::Display,
     ops::{Deref, Index, IndexMut},
+    panic::panic_any,
     u8,
 };
 
@@ -179,6 +180,20 @@ impl BoardDirection {
             ),
         }
     }
+
+    fn relative_directions(idx1: BoardPos, idx2: BoardPos) -> Option<BoardDirection> {
+        if idx1.get_row() == idx2.get_row() {
+            Some(BoardDirection::Horizontal)
+        } else if idx1.get_column() == idx2.get_column() {
+            Some(BoardDirection::Vertical)
+        } else if idx1.is_in_same_north_east_diagonal(idx2) {
+            Some(BoardDirection::DiagonalNE)
+        } else if idx1.is_in_same_north_west_diagonal(idx2) {
+            Some(BoardDirection::DiagonalNW)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -238,6 +253,17 @@ impl BoardPos {
         let row_diff = self.get_row().abs_diff(idx.get_row());
         let column_diff = self.get_column().abs_diff(idx.get_column());
         column_diff == row_diff
+    }
+
+    fn is_in_same_north_east_diagonal(&self, idx: BoardPos) -> bool {
+        let row_diff = self.get_row() as isize - idx.get_row() as isize;
+        let column_diff = self.get_column() as isize - idx.get_column() as isize;
+        column_diff == row_diff
+    }
+    fn is_in_same_north_west_diagonal(&self, idx: BoardPos) -> bool {
+        let row_diff = self.get_row() as isize - idx.get_row() as isize;
+        let column_diff = self.get_column() as isize - idx.get_column() as isize;
+        column_diff == -row_diff
     }
 
     pub fn try_move_up(&self) -> Option<BoardPos> {
@@ -306,12 +332,36 @@ pub struct Board {
     in_check: bool,
     castle_rights: CastleRights,
     last_move: Option<LegalMove>,
+    king_pos: KingPositions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CastleRights {
+struct CastleRights {
     black: bool,
     white: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct KingPositions {
+    black: BoardPos,
+    white: BoardPos,
+}
+impl KingPositions {
+    fn get(&self, colour: Colour) -> BoardPos {
+        match colour {
+            Colour::Black => self.black,
+            Colour::White => self.white,
+        }
+    }
+}
+
+impl Default for KingPositions {
+    fn default() -> Self {
+        KingPositions {
+            black: BoardPos(60),
+            white: BoardPos(4),
+        }
+    }
 }
 
 impl CastleRights {
@@ -335,6 +385,16 @@ pub struct Move {
     from: BoardPos,
     to: BoardPos,
     promotion_type: Option<PieceKind>,
+}
+
+impl Move {
+    fn new(from: BoardPos, to: BoardPos, promotion_type: Option<PieceKind>) -> Self {
+        Move {
+            from,
+            to,
+            promotion_type,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -435,6 +495,10 @@ impl Board {
         self.castle_rights.get(self.turn.0)
     }
 
+    fn get_current_turn_king_pos(&self) -> BoardPos {
+        self.king_pos.get(self.turn.0)
+    }
+
     pub fn create_standard() -> Self {
         use Colour::*;
         use PieceKind::*;
@@ -469,6 +533,7 @@ impl Board {
                 white: true,
             },
             last_move: None,
+            king_pos: KingPositions::default(),
         }
     }
 
@@ -522,6 +587,20 @@ impl Board {
         true
     }
 
+    fn is_move_en_passant(&self, mv: Move) -> bool {
+        if mv.promotion_type.is_some() {
+            return false;
+        }
+        if mv.from.get_column() != mv.to.get_column() {
+            // Diagonal move
+            if self[mv.to].get_piece().is_none() {
+                // but no capture
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn make_legal_move(mut self, mv: LegalMove) -> Self {
         let from = mv.0.from;
         let to = mv.0.to;
@@ -560,6 +639,7 @@ impl Board {
                         self[BoardPos::D8] = sq!(Rook, Black);
                         self[BoardPos::A8] = sq!();
                     }
+                    //TODO make sure to update king positions and castle only when not in check
                 }
                 Piece { kind: Pawn, colour } => {
                     let from_file = from.0 % 8;
@@ -582,6 +662,7 @@ impl Board {
                 }
                 _ => {}
             }
+            // TODO need to update if in check and castle rights
             self[to] = Square(Some(piece));
             self[from] = sq!();
         }
@@ -684,7 +765,7 @@ impl Board {
                      diag_shifts: &[&dyn Fn(&BoardPos) -> Option<BoardPos>; 2],
                      vec: &mut Vec<BoardPos>| {
                         if let Some(possible_board_pos) = vertical_shift(&idx) {
-                            if self[possible_board_pos].get_piece() == None {
+                            if self[possible_board_pos].get_piece().is_none() {
                                 vec.push(possible_board_pos);
                             }
                         }
@@ -701,10 +782,26 @@ impl Board {
                         }
                     };
                 //Check if starting row
+                let mut vert_movement: &dyn Fn(&BoardPos) -> Option<BoardPos>;
+                let diagonal_movements: &[&dyn Fn(&BoardPos) -> Option<BoardPos>; 2];
+                vert_movement = match piece_colour {
+                    Colour::Black => &BoardPos::try_move_down,
+                    Colour::White => &BoardPos::try_move_up,
+                };
+                diagonal_movements = match piece_colour {
+                    Colour::Black => &[
+                        &BoardPos::try_move_diag_south_east,
+                        &BoardPos::try_move_diag_south_west,
+                    ],
+                    Colour::White => &[
+                        &BoardPos::try_move_diag_north_east,
+                        &BoardPos::try_move_diag_north_west,
+                    ],
+                };
                 if idx.get_row() == piece_colour.get_starting_pawn_row() {
-                    let vert_movement = match piece_colour {
-                        Colour::Black => BoardPos::try_move_down,
-                        Colour::White => BoardPos::try_move_up,
+                    vert_movement = match piece_colour {
+                        Colour::Black => &BoardPos::try_move_down,
+                        Colour::White => &BoardPos::try_move_up,
                     };
                     let one_forward_pos = vert_movement(&idx)
                         .expect("should be able to move forwards as pawn from starting row");
@@ -717,6 +814,7 @@ impl Board {
                         vec.push(two_forward_pos);
                     }
                 }
+                pawn_search_movable_squares(&vert_movement, diagonal_movements, &mut vec);
                 if self.can_en_passant(idx) {
                     let last_move_column = self
                         .last_move
@@ -841,12 +939,132 @@ impl Board {
         attacking_positions
     }
 
-    pub fn legal_movable_squares(&self, idx: BoardPos) -> Vec<BoardPos> {
+    fn move_leave_in_check(&self, mv: Move) -> bool {
+        let colour = self.turn.0;
+        let board = self; // make move on test board and see if king under attack
+        board.make_legal_move(LegalMove(mv));
+        !board
+            .attacking_squares(board.king_pos.get(colour))
+            .is_empty()
+    }
+
+    fn does_pos_block_attack(
+        king_pos: BoardPos,
+        attacking_pos: BoardPos,
+        blocking_pos: BoardPos,
+    ) -> bool {
+        let attack_direction = BoardDirection::relative_directions(king_pos, attacking_pos)
+            .expect("fn assumes that king is being attacked");
+        if BoardDirection::relative_directions(king_pos, blocking_pos).is_none() {
+            // blocking piece not in same direction as attcking piece
+            return false;
+        }
+        match attack_direction {
+            BoardDirection::Vertical => {
+                (king_pos.get_row()..attacking_pos.get_row()).contains(&blocking_pos.get_row())
+                    || (attacking_pos.get_row()..king_pos.get_row())
+                        .contains(&blocking_pos.get_row())
+            }
+            _ => {
+                // for horizontal and all diagonal directions (diagonal directions can check row or
+                // column because we already assume that we're in the correct diagonal)
+                (king_pos.get_column()..attacking_pos.get_column())
+                    .contains(&blocking_pos.get_column())
+                    || (attacking_pos.get_column()..king_pos.get_column())
+                        .contains(&blocking_pos.get_column())
+            }
+        }
+    }
+
+    pub fn legal_movable_squares(&self, piece_idx_from: BoardPos) -> Vec<BoardPos> {
+        // Check if piece to move is possibly pinned
+        let full_test_filter = |to: &BoardPos| {
+            self.move_leave_in_check(Move {
+                from: piece_idx_from,
+                to: *to,
+                promotion_type: None,
+            })
+        };
+        let piece_to_move = self[piece_idx_from]
+            .get_piece()
+            .expect("Should be considering legal movable squares of non empty squares only");
+        let pseudolegal_moveable_squares = self.pseudolegal_movable_squares(piece_idx_from);
+        if piece_to_move.kind == PieceKind::King {
+            return pseudolegal_moveable_squares
+                .into_iter()
+                .filter(full_test_filter)
+                .collect::<Vec<BoardPos>>();
+        }
+        // Now we can safely assume piece to move is not king
+        if let Some(direction) =
+            BoardDirection::relative_directions(piece_idx_from, self.get_current_turn_king_pos())
+        {
+            if self.is_piece_absolute_pinned(piece_idx_from, direction) {
+                // Only moves in pinned direction allowed, i.e cannot move out of absolute pin
+                return pseudolegal_moveable_squares
+                    .into_iter()
+                    .filter(|to: &BoardPos| {
+                        BoardDirection::relative_directions(piece_idx_from, *to).is_some_and(
+                            |move_direction: BoardDirection| move_direction == direction,
+                        )
+                    })
+                    .collect::<Vec<BoardPos>>();
+            }
+        }
+        // Now can assume piece is not absolutely pinned
         if self.in_check {
-            // Find attacking moves
-            Vec::new()
+            // Find attacking squares
+            let mut attacking_squares = self.attacking_squares(self.king_pos.get(self.turn.0));
+            if attacking_squares.len() == 2 {
+                // double attack on king, only king moves are valid, but since piece_to_move is not
+                // king, we can just return empty vec
+                Vec::new()
+            } else if attacking_squares.len() == 1 {
+                let attacking_sq = attacking_squares.pop().expect("vec should have 1 element");
+                let attacking_piece_kind = self[attacking_sq]
+                    .get_piece()
+                    .expect("Should be attacked by a non empty piece")
+                    .kind;
+                match attacking_piece_kind {
+                    PieceKind::Knight | PieceKind::Pawn => {
+                        pseudolegal_moveable_squares
+                            .into_iter()
+                            .filter(|to: &BoardPos| *to == attacking_sq)
+                            .collect::<Vec<BoardPos>>() // must capture knight
+                    }
+                    PieceKind::King => {
+                        panic!("King being attacked by another king");
+                    }
+                    kind => {
+                        // Attacked by a rook, queen, or bishop, find attacking direction and
+                        // filter by moves to a position in between the king and attacking piece in that direction
+                        // or pieces that capture the piece
+                        pseudolegal_moveable_squares
+                            .into_iter()
+                            .filter(|to: &BoardPos| {
+                                *to == attacking_sq
+                                    || Board::does_pos_block_attack(
+                                        self.get_current_turn_king_pos(),
+                                        attacking_sq,
+                                        *to,
+                                    )
+                            })
+                            .collect::<Vec<BoardPos>>() // must capture knight
+                    }
+                }
+            } else {
+                panic!("should not be able to have 3 pieces attacking king");
+            }
         } else {
-            self.pseudolegal_movable_squares(idx)
+            // check not pinned and castle not leave king in check
+            if piece_to_move.kind == PieceKind::Pawn {
+                pseudolegal_moveable_squares
+                    .into_iter()
+                    .filter(full_test_filter)
+                    .collect::<Vec<BoardPos>>()
+            } else {
+                pseudolegal_moveable_squares
+            }
         }
     }
 
@@ -947,7 +1165,7 @@ mod tests {
     fn test_possible_moves_pawn() {
         let board = Board::create_standard();
         let moves = board.pseudolegal_movable_squares(BoardPos::new(8));
-        assert_eq!(moves, vec![BoardPos(16), BoardPos(17)]);
+        assert_eq!(moves, vec![BoardPos(24), BoardPos(16)]);
     }
 
     #[test]
@@ -965,5 +1183,34 @@ mod tests {
             colour: Colour::Black,
         }));
         assert!(board.is_piece_absolute_pinned(BoardPos::new(12), BoardDirection::Vertical));
+    }
+    #[test]
+    fn test_attacking_squares() {
+        let mut board = Board::create_standard();
+        board.squares[52] = sq!(Queen, Black);
+        board.squares[12] = sq!();
+        board.squares[11] = sq!();
+        board.squares[32] = sq!(Bishop, Black);
+        let attacking = board.attacking_squares(BoardPos(4));
+        assert_eq!(attacking, vec![BoardPos(52), BoardPos(32)]);
+    }
+
+    #[test]
+    fn test_block_attack() {
+        let mut board = Board::create_standard();
+        board.squares[12] = sq!();
+        board.squares[52] = sq!(Queen, Black);
+        let does_block = Board::does_pos_block_attack(
+            board.get_current_turn_king_pos(),
+            BoardPos(52),
+            BoardPos(20),
+        );
+        let does_not_block = Board::does_pos_block_attack(
+            board.get_current_turn_king_pos(),
+            BoardPos(52),
+            BoardPos(21),
+        );
+        assert!(does_block);
+        assert!(!does_not_block);
     }
 }
