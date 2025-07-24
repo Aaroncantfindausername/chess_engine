@@ -9,7 +9,6 @@ use bevy::{prelude::*, transform};
 use std::ops::{Index, IndexMut};
 
 use std::ops::{Deref, DerefMut};
-use std::process::id;
 use std::u8;
 
 pub const BOARD_SCALE: f32 = 0.8;
@@ -140,24 +139,25 @@ pub fn setup_board(
         ))
         .id();
     let board_sq_pos = board_sq_pos.0;
+    let mut bundles = Vec::new();
+    // Create bundles
     for idx in (0..16).chain(48..64) {
         let piece = board.deref()[BoardPos::new(idx as u8)]
             .get_piece()
             .expect("Expected piece, found none instead while calculating path to piece imgs");
         let path = piece.to_string() + ".png";
-        let child_piece = commands
-            .spawn((
-                Sprite::from_image(asset_server.load(path)),
-                Transform::from_translation(board_sq_pos[idx]).with_scale(Vec3::splat(0.15)),
-                piece,
-                BoardPos::new(idx as u8),
-            ))
-            .id();
-
-        //commands.entity(root_board).add_child(child_piece);
+        let bundle = (
+            Sprite::from_image(asset_server.load(path)),
+            Transform::from_translation(board_sq_pos[idx]).with_scale(Vec3::splat(0.15)),
+            piece,
+            BoardPos::new(idx as u8),
+        );
+        bundles.push(bundle);
     }
+    // Make piece entities with bundles
+    commands.spawn_batch(bundles);
 
-    for idx in (0..64) {
+    for idx in 0..64 {
         const HIGHTLIGHT_SQ_PATH: &str = "king_white.png";
         commands.spawn((
             Sprite::from_image(asset_server.load(HIGHTLIGHT_SQ_PATH)),
@@ -240,75 +240,106 @@ fn cords_to_index(pos: Vec3) -> Option<BoardPos> {
 
 pub fn gui_make_legal_move(
     board: &Board,
-    piece_query: Query<(&mut BoardPos, &mut Transform), (With<BoardPos>, Without<HighlightSquare>)>,
+    mut piece_query: Query<
+        (Entity, &mut BoardPos, &mut Transform),
+        (With<BoardPos>, Without<HighlightSquare>),
+    >,
     mv: LegalMove,
+    board_sq_pos: &BoardSqPos,
+    mut commands: Commands,
 ) {
     eprintln!("gui making legal move");
-    let from = mv.to();
-    let to = mv.from();
-    if let Square(Some(piece)) = board[from] {
-        use Colour::*;
-        use PieceKind::*;
-        match piece {
-            Piece {
-                kind: King,
-                colour: White,
-            } => {
-                // Check for short castle white
-                if to == BoardPos::G1 && from == BoardPos::E1 {
-                    // Move rook
-                    board[BoardPos::F1] = sq!(Rook, White);
-                    board[BoardPos::H1] = sq!();
-                } else if to.0 == 2 && from.0 == 4 {
-                    // long castle white
-                    // Move rook
-                    board[BoardPos::D1] = sq!(Rook, White);
-                    board[BoardPos::A1] = sq!();
-                }
+    // If move is castle
+    if let Some(castle_type) = board.move_castle_type(&mv) {
+        eprintln!("gui_make_legal_move; castle move detected");
+        let offset: BoardPos = match board.get_turn() {
+            Colour::Black => BoardPos::new(56),
+            Colour::White => BoardPos::new(0),
+        };
+        let rook_pos: BoardPos;
+        let target_rook_pos: BoardPos;
+        match castle_type {
+            CastleType::Long => {
+                rook_pos = offset + BoardPos::A1;
+                target_rook_pos = offset + BoardPos::D1;
             }
-            Piece {
-                kind: King,
-                colour: Black,
-            } => {
-                // Check for short castle black
-                if to == BoardPos::G8 && from == BoardPos::E8 {
-                    // Move rook
-                    board[BoardPos::F8] = sq!(Rook, Black);
-                    board[BoardPos::H8] = sq!();
-                } else if to == BoardPos::C8 && from == BoardPos::E8 {
-                    // long castle black
-                    // Move rook
-                    board[BoardPos::D8] = sq!(Rook, Black);
-                    board[BoardPos::A8] = sq!();
-                }
-                board.king_pos.set(to, board.get_turn());
+            CastleType::Short => {
+                rook_pos = offset + BoardPos::H1;
+                target_rook_pos = offset + BoardPos::F1
             }
-            Piece { kind: Pawn, colour } => {
-                let from_file = from.get_column();
-                let to_file = to.get_column();
-                // En passant: diagonal move but target square is empty
-                if (to_file != from_file) && board[to].0.is_none() {
-                    let captured_pawn_pos = match colour {
-                        Black => to.0 - 8,
-                        White => to.0 + 8,
-                    };
-                    board[BoardPos(captured_pawn_pos)] = sq!();
-                } else if (to_file, colour) == (7, White) || (to_file, colour) == (0, Black) {
-                    let kind =
-                        mv.0.promotion_type
-                            .expect("No promotion_type given for move");
-                    board[to] = Square(Some(Piece { kind, colour }));
-                    board[from] = sq!();
-                    return board;
-                }
-            }
-            _ => {}
         }
-        board[to] = Square(Some(piece));
-        board[from] = sq!();
-    } else {
-        panic!("Legal move on non existant square");
+        // move rook to castled position
+
+        let mut rook_transform = None;
+        let mut rook_idx_component = None;
+        for (_, pos, transform) in piece_query.iter_mut() {
+            if *pos == rook_pos {
+                rook_transform = Some(transform);
+                rook_idx_component = Some(pos);
+            }
+        }
+        let rook_transform = rook_transform.expect("Should have rook if castling");
+        let rook_idx_component = rook_idx_component.expect("Should have rook if castling");
+        gui_move_piece(
+            rook_transform,
+            rook_idx_component,
+            target_rook_pos,
+            board_sq_pos,
+        )
+    } else if let Some(en_passant_direction) = board.move_en_passant_type(&mv) {
+        // En passant move
+        let pawn_to_remove_pos: BoardPos = match en_passant_direction {
+            EnPassantDirection::Left => mv
+                .from()
+                .try_move_left()
+                .expect("Should have piece to the left side if en passanting left"),
+            EnPassantDirection::Right => mv
+                .from()
+                .try_move_right()
+                .expect("Should have piece to the left side if en passanting left"),
+        };
+        let entity_to_remove = piece_query
+            .iter()
+            .filter_map(|(entity, pos, _)| {
+                if *pos == pawn_to_remove_pos {
+                    Some(entity)
+                } else {
+                    None
+                }
+            })
+            .next()
+            .expect("Pawn to remove should exist if legal en passant move");
+        commands.entity(entity_to_remove).despawn();
+    } else if board[mv.to()].get_piece().is_some() {
+        // Capturing move
+        let captured_piece_entity = piece_query
+            .iter_mut()
+            .filter_map(|(entity, idx, _)| {
+                if *idx == mv.to() {
+                    // return captured piece
+                    Some(entity)
+                } else {
+                    None
+                }
+            })
+            .next()
+            .expect("Should be capturing piece");
+        commands.entity(captured_piece_entity).despawn();
     }
+    // Todo check for promotion move
+
+    // Make normal move
+    let mut piece_transform = None;
+    let mut piece_idx_component = None;
+    for (_, pos, transform) in piece_query.iter_mut() {
+        if *pos == mv.from() {
+            piece_transform = Some(transform);
+            piece_idx_component = Some(pos);
+        }
+    }
+    let piece_transform = piece_transform.expect("Piece should exist if moving it");
+    let piece_idx_component = piece_idx_component.expect("Piece should exist if moving it");
+    gui_move_piece(piece_transform, piece_idx_component, mv.to(), board_sq_pos)
 }
 
 pub fn square_drag_system(
@@ -318,62 +349,92 @@ pub fn square_drag_system(
     buttons: Res<ButtonInput<MouseButton>>,
     cursor_cords: Res<WorldCursorCoords>,
     mut writer: EventWriter<PieceRelease>,
-    piece_query: Query<(&mut BoardPos, &mut Transform), (With<BoardPos>, Without<HighlightSquare>)>,
+    mut piece_query: Query<
+        (Entity, &mut BoardPos, &mut Transform),
+        (With<BoardPos>, Without<HighlightSquare>),
+    >,
     movable_sqs: Res<MovableSquares>,
+    commands: Commands,
 ) {
-    let turn = board.get_turn();
     let mut released = false;
-    if let Some(pos) = is_drag.get() {
-        if buttons.just_released(MouseButton::Left) {
+    if let Some(original_pos) = is_drag.get() {
+        // If dragging
+        if !buttons.pressed(MouseButton::Left) {
             is_drag.set(None);
             eprintln!("Released from drag");
             released = true;
             // Stop displaying squares to move
             writer.write(PieceRelease);
         }
-
-        for (mut idx, mut transform) in piece_query {
-            if *idx == pos {
-                if released {
-                    eprintln!("Released and Snapping to grid");
-                    let target_index = cords_to_index(transform.translation);
-                    let vec;
-                    if let Some(target_pos) = target_index {
-                        if movable_sqs
-                            .get()
-                            .expect("Should have movable sqs if just dragging piece")
-                            .contains(&target_pos)
-                        {
-                            *board = board.make_legal_move(LegalMove::new_unchecked(
-                                chess_board::Move::new(*idx, target_pos, None),
-                            ));
-                            vec = board_sq_pos[target_pos];
-                            *idx = target_pos;
-                            // TODO check if castle and if so move update rook pos
-                            // TODO ask for promotion type if pawn move to promotion row
-                        } else {
-                            // don't make move and snap piece back to original square
-                            vec = board_sq_pos[*idx]
-                        }
-                    } else {
-                        vec = board_sq_pos[*idx]
-                    }
-                    *transform = transform.with_translation(vec);
-                    gui_move_piece(transform.deref_mut(), vec, &board_sq_pos);
+        let mut piece_transform = None;
+        let mut piece_idx_component = None;
+        for (_, idx, transform) in piece_query.iter_mut() {
+            if *idx == original_pos {
+                piece_transform = Some(transform);
+                piece_idx_component = Some(idx);
+            }
+        }
+        let mut piece_transform =
+            piece_transform.expect("Should be dragging existing piece on the board");
+        let piece_idx_component =
+            piece_idx_component.expect("Should be dragging existing piece on the board");
+        if released {
+            eprintln!("Released drag");
+            let target_index = cords_to_index(cursor_cords.get());
+            if let Some(target_pos) = target_index {
+                if movable_sqs
+                    .get()
+                    .expect("Should have movable sqs if just dragging piece")
+                    .contains(&target_pos)
+                {
+                    // If cursor drag is released over a movable square
+                    // gui should make move first and also update idx component
+                    let legal_move =
+                        LegalMove::new_unchecked(*piece_idx_component, target_pos, None);
+                    gui_make_legal_move(
+                        board.deref(),
+                        piece_query,
+                        legal_move,
+                        board_sq_pos.deref(),
+                        commands,
+                    );
+                    *board = board.make_legal_move(legal_move);
+                    // TODO ask for promotion type if pawn move to promotion row
                 } else {
-                    gui_move_piece(
-                        transform.deref_mut(),
-                        cursor_cords.deref().get(),
-                        &board_sq_pos,
+                    // don't make move and snap piece back to original square
+                    gui_change_piece_transform(
+                        piece_transform.deref_mut(),
+                        board_sq_pos[original_pos],
                     );
                 }
+            } else {
+                // move back to original square
+                gui_move_piece(
+                    piece_transform,
+                    piece_idx_component,
+                    original_pos,
+                    board_sq_pos.deref(),
+                );
             }
+        } else {
+            // Drag to current cursor cords
+            gui_change_piece_transform(piece_transform.deref_mut(), cursor_cords.deref().get());
         }
     }
 }
 
-fn gui_move_piece(transform: &mut Transform, target_vec: Vec3, board_sq_pos: &BoardSqPos) {
+fn gui_change_piece_transform(transform: &mut Transform, target_vec: Vec3) {
     *transform = transform.with_translation(target_vec.with_z(1.0));
+}
+
+fn gui_move_piece(
+    mut transform: Mut<'_, Transform>,
+    mut idx_component: Mut<'_, BoardPos>,
+    target_pos: BoardPos,
+    board_sq_pos: &BoardSqPos,
+) {
+    *transform = transform.with_translation(board_sq_pos[target_pos]);
+    *idx_component = target_pos;
 }
 
 pub fn update_cursor_system(
@@ -412,9 +473,8 @@ pub fn movable_squares_system(
     mut highlight_query: Query<(&mut Transform, &BoardPos), With<HighlightSquare>>,
 ) {
     let mut toggle_highlight_squares = |sqs: &Vec<BoardPos>| {
-        eprintln!("toggling squares: {sqs:?}");
+        //eprintln!("toggling squares: {sqs:?}");
         for (mut transform, idx) in highlight_query.iter_mut() {
-            eprintln!("idx in query: {idx:?}");
             if sqs.contains(idx) {
                 if transform.deref().translation.z == -1.0 {
                     eprintln!("toggle_highlight_squares: making square {idx:?} visible");
@@ -428,10 +488,6 @@ pub fn movable_squares_system(
             }
         }
     };
-    // TODO remove if press and release don't happen simul
-    if !press_reader.is_empty() && !release_reader.is_empty() {
-        panic!("pressed and released on the some frame");
-    }
     if !press_reader.is_empty() {
         eprintln!("received press event");
         if press_reader.len() > 1 {
@@ -445,8 +501,13 @@ pub fn movable_squares_system(
                     .expect("If just pressed, movable_sqs shouldn't be empty"),
             );
         }
-    } else if !release_reader.is_empty() {
-        eprintln!("received release event");
+        press_reader.clear();
+    }
+    if !release_reader.is_empty() {
+        eprintln!(
+            "received release event, number of release events {:?}",
+            release_reader.len()
+        );
         toggle_highlight_squares(
             &movable_sqs
                 .0

@@ -1,6 +1,6 @@
 use std::{
     fmt::Display,
-    ops::{Deref, Index, IndexMut},
+    ops::{Add, Deref, Index, IndexMut},
     panic::panic_any,
     u8,
 };
@@ -153,15 +153,15 @@ impl Colour {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum EnPassantDirection {
+pub enum EnPassantDirection {
     Left,
     Right,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum CastleType {
-    Long(Colour),
-    Short(Colour),
+pub enum CastleType {
+    Long,
+    Short,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -331,6 +331,13 @@ impl BoardPos {
     }
 }
 
+impl Add for BoardPos {
+    type Output = BoardPos;
+    fn add(self, rhs: Self) -> Self::Output {
+        BoardPos::new(self.0 + rhs.0)
+    }
+}
+
 impl From<BoardPos> for usize {
     fn from(value: BoardPos) -> Self {
         value.0 as usize
@@ -372,7 +379,7 @@ impl KingPositions {
                 self.black = pos;
             }
             Colour::White => {
-                self.black = pos;
+                self.white = pos;
             }
         }
     }
@@ -439,8 +446,12 @@ impl Deref for LegalMove {
 }
 
 impl LegalMove {
-    pub fn new_unchecked(mv: Move) -> Self {
-        LegalMove(mv)
+    pub fn new_unchecked(from: BoardPos, to: BoardPos, promotion_type: Option<PieceKind>) -> Self {
+        LegalMove(Move {
+            from,
+            to,
+            promotion_type,
+        })
     }
 }
 
@@ -628,7 +639,7 @@ impl Board {
         true
     }
 
-    pub fn move_en_passant_type(&self, mv: Move) -> Option<EnPassantDirection> {
+    pub fn move_en_passant_type(&self, mv: &Move) -> Option<EnPassantDirection> {
         if self[mv.to].get_piece()?.kind != PieceKind::Pawn {
             return None;
         }
@@ -646,15 +657,26 @@ impl Board {
         None
     }
 
-    pub fn move_castle_type(&self, mv: Move) -> Option<CastleType> {
-        // TODO
-        if self[mv.to].get_piece()?.kind != PieceKind::King {
+    pub fn move_castle_type(&self, mv: &Move) -> Option<CastleType> {
+        eprintln!("Checking if castle for move: {mv:?}");
+        if self[mv.from].get_piece()?.kind != PieceKind::King {
             return None;
+        }
+        let to_column = mv.to.get_column();
+        let from_column = mv.from.get_column();
+
+        if to_column.abs_diff(from_column) != 2 {
+            return None;
+        }
+        if to_column > from_column {
+            Some(CastleType::Short)
+        } else {
+            Some(CastleType::Long)
         }
     }
 
     pub fn make_legal_move(mut self, mv: LegalMove) -> Self {
-        eprintln!("making legal move");
+        eprintln!("attempting to make legal move, board::make_legal_move, move: {mv:?}, colour moving:{:?}", self.get_turn());
         let from = mv.0.from;
         let to = mv.0.to;
         if let Square(Some(piece)) = self[from] {
@@ -676,6 +698,8 @@ impl Board {
                         self[BoardPos::D1] = sq!(Rook, White);
                         self[BoardPos::A1] = sq!();
                     }
+                    self.king_pos.set(to, self.get_turn());
+                    self.castle_rights.set(self.get_turn(), false);
                 }
                 Piece {
                     kind: King,
@@ -693,6 +717,7 @@ impl Board {
                         self[BoardPos::A8] = sq!();
                     }
                     self.king_pos.set(to, self.get_turn());
+                    self.castle_rights.set(self.get_turn(), false);
                 }
                 Piece { kind: Pawn, colour } => {
                     let from_file = from.get_column();
@@ -704,7 +729,9 @@ impl Board {
                             White => to.0 + 8,
                         };
                         self[BoardPos(captured_pawn_pos)] = sq!();
-                    } else if (to_file, colour) == (7, White) || (to_file, colour) == (0, Black) {
+                    } else if (to.get_row(), colour) == (7, White)
+                        || (to.get_row(), colour) == (0, Black)
+                    {
                         let kind =
                             mv.0.promotion_type
                                 .expect("No promotion_type given for move");
@@ -721,14 +748,22 @@ impl Board {
             panic!("Legal move on non existant square");
         }
         // TODO update castle rights
+        eprintln!("board::make_legal_move updating in check");
+        eprintln!(
+            "king positions: {:?}; other colour: {:?}",
+            self.king_pos,
+            self.get_turn().other_colour()
+        );
         self.in_check = !self
-            .attacking_squares(self.get_current_turn_king_pos())
+            .attacking_squares(self.king_pos.get(self.get_turn().other_colour()))
             .is_empty();
+        eprintln!("In check calculated to be: {:?}", self.in_check);
         self.next_turn();
         self
     }
 
     fn pseudolegal_movable_squares(&self, idx: BoardPos) -> Vec<BoardPos> {
+        eprintln!("finding pseudolegal_movable_squares for piece with idx {idx:?}");
         let search_movable_squares =
             |shift: &dyn Fn(&BoardPos) -> Option<BoardPos>, vec: &mut Vec<BoardPos>| {
                 if let Some(possible_board_pos) = shift(&idx) {
@@ -745,7 +780,9 @@ impl Board {
         // a function
         let repeated_search_movable_squares =
             |shift: &dyn Fn(&BoardPos) -> Option<BoardPos>, vec: &mut Vec<BoardPos>| {
-                while let Some(possible_board_pos) = shift(&idx) {
+                let mut considering_idx = idx;
+                while let Some(possible_board_pos) = shift(&considering_idx) {
+                    //eprintln!("possible board pos in repeated search: {possible_board_pos:?}");
                     if let Square(Some(piece)) = self[possible_board_pos] {
                         // If moving into squares with ally pieces, stop searching
                         if piece.get_colour() == *self.turn {
@@ -758,6 +795,7 @@ impl Board {
                         }
                     }
                     vec.push(possible_board_pos);
+                    considering_idx = possible_board_pos;
                 }
             };
         let mut vec: Vec<BoardPos> = Vec::new();
@@ -794,22 +832,26 @@ impl Board {
                 // Check if can castle, and if so add the positions
                 if self.has_castle_rights() && !self.in_check {
                     let mut can_long_castle = true;
+                    let offset = match self.get_turn() {
+                        Colour::White => BoardPos(0),
+                        Colour::Black => BoardPos(56),
+                    };
                     for idx in [BoardPos::B1, BoardPos::C1, BoardPos::D1] {
-                        if self[idx].get_piece().is_some() {
+                        if self[idx + offset].get_piece().is_some() {
                             can_long_castle = false;
                         }
                     }
                     if can_long_castle {
-                        vec.push(BoardPos::C1);
+                        vec.push(BoardPos::C1 + offset);
                     }
                     let mut can_short_castle = true;
                     for idx in [BoardPos::F1, BoardPos::G1] {
-                        if self[idx].get_piece().is_some() {
+                        if self[idx + offset].get_piece().is_some() {
                             can_short_castle = false;
                         }
                     }
                     if can_short_castle {
-                        vec.push(BoardPos::G1);
+                        vec.push(BoardPos::G1 + offset);
                     }
                 }
             }
@@ -910,6 +952,7 @@ impl Board {
     }
 
     fn attacking_squares(&self, idx: BoardPos) -> Vec<BoardPos> {
+        eprintln!("Findind attacking squares for piece with idx: {idx:?}");
         let piece_colour = self[idx]
             .0
             .expect("should be finding attacking squares for non-empty square")
@@ -1000,15 +1043,15 @@ impl Board {
 
     fn move_leave_in_check(&self, mv: Move) -> bool {
         let colour = self.turn.0;
-        let board = self; // make move on test board and see if king under attack
-        board.make_legal_move(LegalMove(mv));
+        eprintln!("move_leave_in_check colour: {colour:?}");
+        let mut board = *self; // make move on test board and see if king under attack
+        board = board.make_legal_move(LegalMove(mv));
+        eprintln!("move_leave_in_check has made test move, king positions of self and test board: {:?} {:?}", self.king_pos, board.king_pos);
+        let attacking_squares = board.attacking_squares(board.king_pos.get(colour));
         eprintln!(
-            "attacking squares for king after trying move for full test filter{:?}",
-            board.attacking_squares(board.king_pos.get(colour))
+            "attacking squares for king after trying move for full test filter{attacking_squares:?}",
         );
-        !board
-            .attacking_squares(board.king_pos.get(colour))
-            .is_empty()
+        !attacking_squares.is_empty()
     }
 
     fn does_pos_block_attack(
@@ -1040,6 +1083,7 @@ impl Board {
     }
 
     pub fn legal_movable_squares(&self, piece_idx_from: BoardPos) -> Vec<BoardPos> {
+        eprintln!("Finding legal movable squares for piece with index {piece_idx_from:?}");
         // Check if piece to move is possibly pinned
         let full_test_filter = |to: &BoardPos| {
             !self.move_leave_in_check(Move {
@@ -1076,6 +1120,7 @@ impl Board {
                     .collect::<Vec<BoardPos>>();
             }
         }
+        eprintln!("legal_movable_squares: Piece to move is not absolutely pinned");
         // Now can assume piece is not absolutely pinned
         if self.in_check {
             eprintln!("in check");
@@ -1122,6 +1167,7 @@ impl Board {
                 panic!("should not be able to have 3 pieces attacking king");
             }
         } else {
+            eprintln!("Neither pinned nor in check");
             // check not pinned and castle not leave king in check
             if piece_to_move.kind == PieceKind::Pawn {
                 eprintln!("not in check pawn move");
@@ -1130,6 +1176,7 @@ impl Board {
                     .filter(full_test_filter)
                     .collect::<Vec<BoardPos>>()
             } else {
+                eprintln!("legal_movable_squares returning pseudolegal_moveable_squares: {pseudolegal_moveable_squares:?}");
                 pseudolegal_moveable_squares
             }
         }
