@@ -1,6 +1,6 @@
 use std::{
     fmt::Display,
-    ops::{Add, Deref, Index, IndexMut},
+    ops::{Add, Deref, DerefMut, Index, IndexMut},
     panic::panic_any,
     u8,
 };
@@ -21,6 +21,8 @@ macro_rules! sq {
         Square(None)
     };
 }
+type Row = u8;
+type Column = u8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PieceKind {
@@ -127,27 +129,36 @@ pub enum Colour {
 }
 
 impl Colour {
-    const WHITE_EN_PASSANT_ROW: u8 = 4;
-    const BLACK_EN_PASSANT_ROW: u8 = 3;
-    const WHITE_PAWN_ROW: u8 = 1;
-    const BLACK_PAWN_ROW: u8 = 6;
+    const WHITE_EN_PASSANT_ROW: Row = 4;
+    const BLACK_EN_PASSANT_ROW: Row = 3;
+    const WHITE_PAWN_ROW: Row = 1;
+    const BLACK_PAWN_ROW: Row = 6;
+    const WHITE_PROMOTION_ROW: Row = 7;
+    const BLACK_PROMOTION_ROW: Row = 0;
     pub fn other_colour(&self) -> Self {
         match *self {
             Colour::Black => Colour::White,
             Colour::White => Colour::Black,
         }
     }
-    fn get_en_passant_row(&self) -> u8 {
+    fn get_en_passant_row(&self) -> Row {
         match *self {
             Colour::Black => Colour::BLACK_EN_PASSANT_ROW,
             Colour::White => Colour::WHITE_EN_PASSANT_ROW,
         }
     }
 
-    fn get_starting_pawn_row(&self) -> u8 {
+    fn get_starting_pawn_row(&self) -> Row {
         match *self {
             Colour::Black => Colour::BLACK_PAWN_ROW,
             Colour::White => Colour::WHITE_PAWN_ROW,
+        }
+    }
+
+    fn get_promotion_row(&self) -> Row {
+        match *self {
+            Colour::Black => Colour::BLACK_PROMOTION_ROW,
+            Colour::White => Colour::WHITE_PROMOTION_ROW,
         }
     }
 }
@@ -235,6 +246,9 @@ impl Piece {
     }
     pub fn get_colour(&self) -> Colour {
         self.colour
+    }
+    pub fn new(kind: PieceKind, colour: Colour) -> Piece {
+        Piece { kind, colour }
     }
 }
 
@@ -352,6 +366,44 @@ pub struct Board {
     castle_rights: CastleRights,
     last_move: Option<LegalMove>,
     king_pos: KingPositions,
+    piece_bitboards: PieceBitBoards,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PieceBitBoards {
+    black: u64,
+    white: u64,
+}
+
+impl Default for PieceBitBoards {
+    fn default() -> Self {
+        PieceBitBoards {
+            black: 0xFFFF << 48,
+            white: 0xFFFF,
+        }
+    }
+}
+
+impl PieceBitBoards {
+    fn get(&self, colour: Colour, idx: u64) -> bool {
+        match colour {
+            Colour::Black => (self.black >> idx) & 1 == 1,
+            Colour::White => (self.white >> idx) & 1 == 1,
+        }
+    }
+
+    fn set(&mut self, colour: Colour, idx: u8, bit: bool) {
+        let mask = 1u64 << idx;
+        let target = match colour {
+            Colour::Black => &mut self.black,
+            Colour::White => &mut self.white,
+        };
+        if bit {
+            *target |= mask;
+        } else {
+            *target &= !mask;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -445,6 +497,12 @@ impl Deref for LegalMove {
     }
 }
 
+impl DerefMut for LegalMove {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl LegalMove {
     pub fn new_unchecked(from: BoardPos, to: BoardPos, promotion_type: Option<PieceKind>) -> Self {
         LegalMove(Move {
@@ -452,6 +510,15 @@ impl LegalMove {
             to,
             promotion_type,
         })
+    }
+
+    pub fn with_promotion_type(mut self, promotion_type: PieceKind) -> Self {
+        self.promotion_type = Some(promotion_type);
+        self
+    }
+
+    pub fn get_promotion_kind(&self) -> Option<PieceKind> {
+        self.0.promotion_type
     }
 }
 
@@ -586,6 +653,7 @@ impl Board {
             },
             last_move: None,
             king_pos: KingPositions::default(),
+            piece_bitboards: PieceBitBoards::default(),
         }
     }
 
@@ -607,7 +675,7 @@ impl Board {
             } else if idx.get_row() != pawn.colour.get_en_passant_row() {
                 return false;
             } else if last_move.to.get_row() != pawn.colour.get_en_passant_row()
-                || last_move.from.get_row() != pawn.colour.get_starting_pawn_row()
+                || last_move.from.get_row() != pawn.colour.other_colour().get_starting_pawn_row()
             {
                 return false;
             } else if last_move.to.get_column() >= idx.get_column() {
@@ -640,7 +708,7 @@ impl Board {
     }
 
     pub fn move_en_passant_type(&self, mv: &Move) -> Option<EnPassantDirection> {
-        if self[mv.to].get_piece()?.kind != PieceKind::Pawn {
+        if self[mv.from].get_piece()?.kind != PieceKind::Pawn {
             return None;
         }
         if self[mv.to].get_piece().is_none() {
@@ -675,10 +743,21 @@ impl Board {
         }
     }
 
+    pub fn is_promotion_move(&self, mv: &Move) -> bool {
+        if let Some(piece_to_move) = self[mv.from].get_piece() {
+            mv.to.get_row() == piece_to_move.colour.get_promotion_row()
+                && piece_to_move.kind == PieceKind::Pawn
+        } else {
+            // Invalid move
+            false
+        }
+    }
+
     pub fn make_legal_move(mut self, mv: LegalMove) -> Self {
         eprintln!("attempting to make legal move, board::make_legal_move, move: {mv:?}, colour moving:{:?}", self.get_turn());
         let from = mv.0.from;
         let to = mv.0.to;
+        let mut skip = false;
         if let Square(Some(piece)) = self[from] {
             use Colour::*;
             use PieceKind::*;
@@ -724,9 +803,10 @@ impl Board {
                     let to_file = to.get_column();
                     // En passant: diagonal move but target square is empty
                     if (to_file != from_file) && self[to].0.is_none() {
+                        eprintln!("Identified en passant move");
                         let captured_pawn_pos = match colour {
-                            Black => to.0 - 8,
-                            White => to.0 + 8,
+                            Black => to.0 + 8,
+                            White => to.0 - 8,
                         };
                         self[BoardPos(captured_pawn_pos)] = sq!();
                     } else if (to.get_row(), colour) == (7, White)
@@ -737,13 +817,15 @@ impl Board {
                                 .expect("No promotion_type given for move");
                         self[to] = Square(Some(Piece { kind, colour }));
                         self[from] = sq!();
-                        return self;
+                        skip = true;
                     }
                 }
                 _ => {}
             }
-            self[to] = Square(Some(piece));
-            self[from] = sq!();
+            if !skip {
+                self[to] = Square(Some(piece));
+                self[from] = sq!();
+            }
         } else {
             panic!("Legal move on non existant square");
         }
@@ -759,6 +841,7 @@ impl Board {
             .is_empty();
         eprintln!("In check calculated to be: {:?}", self.in_check);
         self.next_turn();
+        self.last_move = Some(mv);
         self
     }
 
@@ -916,6 +999,7 @@ impl Board {
                     }
                 }
                 pawn_search_movable_squares(&vert_movement, diagonal_movements, &mut vec);
+                eprintln!("can pawn en passant: {:?}", self.can_en_passant(idx));
                 if self.can_en_passant(idx) {
                     let last_move_column = self
                         .last_move
@@ -925,22 +1009,22 @@ impl Board {
                     if idx.get_column() > last_move_column {
                         match piece_colour {
                             Colour::Black => vec.push(
-                                idx.try_move_diag_south_east()
+                                idx.try_move_diag_south_west()
                                     .expect("Should be valid since can en passant"),
                             ),
                             Colour::White => vec.push(
-                                idx.try_move_diag_north_east()
+                                idx.try_move_diag_north_west()
                                     .expect("Should be valid since can en passant"),
                             ),
                         }
                     } else {
                         match piece_colour {
                             Colour::Black => vec.push(
-                                idx.try_move_diag_south_west()
+                                idx.try_move_diag_south_east()
                                     .expect("Should be valid since can en passant"),
                             ),
                             Colour::White => vec.push(
-                                idx.try_move_diag_north_west()
+                                idx.try_move_diag_north_east()
                                     .expect("Should be valid since can en passant"),
                             ),
                         }
@@ -1059,24 +1143,31 @@ impl Board {
         attacking_pos: BoardPos,
         blocking_pos: BoardPos,
     ) -> bool {
+        eprintln!("Checking if pos blocks:{blocking_pos:?}");
         let attack_direction = BoardDirection::relative_directions(king_pos, attacking_pos)
             .expect("fn assumes that king is being attacked");
-        if BoardDirection::relative_directions(king_pos, blocking_pos).is_none() {
+        eprintln!("Attacking directions: {attack_direction:?}");
+        if let Some(dir) = BoardDirection::relative_directions(king_pos, blocking_pos) {
+            if dir != attack_direction {
+                return false;
+            }
+        } else {
             // blocking piece not in same direction as attcking piece
+            eprintln!("King and blocking_pos aren't in a direction so returning false");
             return false;
         }
         match attack_direction {
             BoardDirection::Vertical => {
-                (king_pos.get_row()..attacking_pos.get_row()).contains(&blocking_pos.get_row())
-                    || (attacking_pos.get_row()..king_pos.get_row())
+                (king_pos.get_row()..=attacking_pos.get_row()).contains(&blocking_pos.get_row())
+                    || (attacking_pos.get_row()..=king_pos.get_row())
                         .contains(&blocking_pos.get_row())
             }
             _ => {
                 // for horizontal and all diagonal directions (diagonal directions can check row or
                 // column because we already assume that we're in the correct diagonal)
-                (king_pos.get_column()..attacking_pos.get_column())
+                (king_pos.get_column()..=attacking_pos.get_column())
                     .contains(&blocking_pos.get_column())
-                    || (attacking_pos.get_column()..king_pos.get_column())
+                    || (attacking_pos.get_column()..=king_pos.get_column())
                         .contains(&blocking_pos.get_column())
             }
         }
@@ -1085,16 +1176,21 @@ impl Board {
     pub fn legal_movable_squares(&self, piece_idx_from: BoardPos) -> Vec<BoardPos> {
         eprintln!("Finding legal movable squares for piece with index {piece_idx_from:?}");
         // Check if piece to move is possibly pinned
+        let piece_to_move = self[piece_idx_from]
+            .get_piece()
+            .expect("Should be considering legal movable squares of non empty squares only");
+        let colour = piece_to_move.colour;
         let full_test_filter = |to: &BoardPos| {
             !self.move_leave_in_check(Move {
                 from: piece_idx_from,
                 to: *to,
-                promotion_type: None,
+                promotion_type: if to.get_row() == colour.get_promotion_row() {
+                    Some(PieceKind::Queen)
+                } else {
+                    None
+                },
             })
         };
-        let piece_to_move = self[piece_idx_from]
-            .get_piece()
-            .expect("Should be considering legal movable squares of non empty squares only");
         let pseudolegal_moveable_squares = self.pseudolegal_movable_squares(piece_idx_from);
         eprintln!("pseudolegal_moveable_squares: {pseudolegal_moveable_squares:?}");
         if piece_to_move.kind == PieceKind::King {
@@ -1150,6 +1246,7 @@ impl Board {
                         // Attacked by a rook, queen, or bishop, find attacking direction and
                         // filter by moves to a position in between the king and attacking piece in that direction
                         // or pieces that capture the piece
+                        eprintln!("King attacked by {kind:?}");
                         pseudolegal_moveable_squares
                             .into_iter()
                             .filter(|to: &BoardPos| {
@@ -1160,7 +1257,7 @@ impl Board {
                                         *to,
                                     )
                             })
-                            .collect::<Vec<BoardPos>>() // must capture knight
+                            .collect::<Vec<BoardPos>>()
                     }
                 }
             } else {
@@ -1186,7 +1283,6 @@ impl Board {
         let piece = self[idx]
             .get_piece()
             .expect("Expected piece found empty square");
-        eprintln!("pin fn received piece: {piece:?}");
         fn scan_ray(
             board: &Board,
             start: BoardPos,
@@ -1333,5 +1429,35 @@ mod tests {
         let board = Board::create_standard();
         let movable_sqs = board.legal_movable_squares(BoardPos(8));
         assert!(movable_sqs.contains(&BoardPos(16)) && movable_sqs.contains(&BoardPos(24)));
+    }
+    #[test]
+    fn test_relative_directions() {
+        let idx1 = BoardPos(0);
+        let idx2 = BoardPos(24);
+        assert_eq!(
+            BoardDirection::relative_directions(idx1, idx2),
+            Some(BoardDirection::Vertical)
+        );
+        let idx1 = BoardPos(0);
+        let idx2 = BoardPos(1);
+        assert_eq!(
+            BoardDirection::relative_directions(idx1, idx2),
+            Some(BoardDirection::Horizontal)
+        );
+        let idx1 = BoardPos(1);
+        let idx2 = BoardPos(19);
+        assert_eq!(
+            BoardDirection::relative_directions(idx1, idx2),
+            Some(BoardDirection::DiagonalNE)
+        );
+        let idx1 = BoardPos(10);
+        let idx2 = BoardPos(3);
+        assert_eq!(
+            BoardDirection::relative_directions(idx1, idx2),
+            Some(BoardDirection::DiagonalNW)
+        );
+        let idx1 = BoardPos(0);
+        let idx2 = BoardPos(17);
+        assert_eq!(BoardDirection::relative_directions(idx1, idx2), None);
     }
 }
